@@ -1,5 +1,5 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // AgentPromptTests.swift
@@ -11,8 +11,8 @@ import Testing
 @testable import Agent
 
 // The test templates separate every placeholder with "|", so the built
-// system prompt splits into [CWD, TERMINAL_TOOLS, NETWORK_STATUS, SKILLS,
-// CUSTOM_INSTRUCTIONS].
+// system prompt splits into [CWD, PLATFORM_INSTRUCTIONS, TERMINAL_TOOLS,
+// NETWORK_STATUS, SKILLS, CUSTOM_INSTRUCTIONS].
 
 @Suite("Agent system prompt")
 struct AgentPromptTests {
@@ -39,15 +39,30 @@ struct AgentPromptTests {
         await harness.run(prompt: "hi", tools: [tool], recorder: recorder)
 
         let parts = blocks(systemPrompt(harness))
-        #expect(parts.count == 5)
+        #expect(parts.count == 6)
         #expect(systemPrompt(harness).hasPrefix("XCODE "))
         #expect(parts[0] == "XCODE " + harness.cwd)
-        #expect(parts[1].contains("### TERMINAL & SHELL COMMANDS"))
-        #expect(parts[2].isEmpty) // online: no network status block
-        #expect(parts[3].contains("### AVAILABLE SKILLS"))
-        #expect(parts[3].contains("test-skill"))
-        #expect(parts[4].contains("### PROJECT-SPECIFIC INSTRUCTIONS (AGENTS.MD)"))
-        #expect(parts[4].contains("Always use tabs."))
+        #expect(parts[1].isEmpty) // no platform instructions in the harness
+        #expect(parts[2].contains("### TERMINAL & SHELL COMMANDS"))
+        #expect(parts[3].isEmpty) // online: no network status block
+        #expect(parts[4].contains("### AVAILABLE SKILLS"))
+        #expect(parts[4].contains("test-skill"))
+        #expect(parts[5].contains("### PROJECT-SPECIFIC INSTRUCTIONS (AGENTS.MD)"))
+        #expect(parts[5].contains("Always use tabs."))
+    }
+
+    @Test("platform instructions are substituted into the prompt")
+    func platformInstructionsInjected() async {
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [.response(LLMResponse(content: "ok"))]),
+            platformInstructions: "### PLATFORM: TestOS\nYou are running on TestOS."
+        )
+        let recorder = Recorder()
+        await harness.run(prompt: "hi", recorder: recorder)
+
+        let parts = blocks(systemPrompt(harness))
+        #expect(parts[1].contains("### PLATFORM: TestOS"))
+        #expect(parts[1].contains("You are running on TestOS."))
     }
 
     @Test("the terminal block is omitted without run_command")
@@ -59,7 +74,7 @@ struct AgentPromptTests {
         await harness.run(prompt: "hi", tools: [testToolDefinition("other_tool")], recorder: recorder)
 
         let parts = blocks(systemPrompt(harness))
-        #expect(parts[1].isEmpty)
+        #expect(parts[2].isEmpty)
     }
 
     @Test("no AGENTS.md means no custom instructions block")
@@ -71,7 +86,7 @@ struct AgentPromptTests {
         await harness.run(prompt: "hi", recorder: recorder)
 
         let parts = blocks(systemPrompt(harness))
-        #expect(parts[4].isEmpty)
+        #expect(parts[5].isEmpty)
     }
 
     @Test("no skills means an empty skills block")
@@ -83,7 +98,7 @@ struct AgentPromptTests {
         await harness.run(prompt: "hi", recorder: recorder)
 
         let parts = blocks(systemPrompt(harness))
-        #expect(parts[3].isEmpty)
+        #expect(parts[4].isEmpty)
     }
 
     @Test("unknown clients fall back to the generic template")

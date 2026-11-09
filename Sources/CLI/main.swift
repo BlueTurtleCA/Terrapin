@@ -1,5 +1,5 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // main.swift
@@ -59,7 +59,7 @@ if let override = config.contextWindowOverride {
 }
 logger.debug("Using context window of: \(contextWindow)")
 if config.debugLog {
-    logger.debug("Debug logging enabled: LLM request bodies + Xcode MCP bridge calls -> ~/.terrapincode/logs/")
+    logger.debug("Debug logging enabled: LLM request bodies + Xcode MCP bridge calls -> ~/.terrapin/logs/")
 }
 
 // 4. Wire up the agent
@@ -73,6 +73,7 @@ let agent = Agent(
     sessionStore: sessionStore,
     contextWindow: contextWindow,
     systemPromptTemplates: loadSystemPromptTemplates(),
+    platformInstructions: loadPlatformInstructions(),
     skillCatalog: skillCatalog,
     logger: logger,
     slotCount: config.slots
@@ -99,10 +100,10 @@ await server.run()
 func loadSystemPromptTemplates() -> [ClientKind: String] {
     func load(_ name: String) -> String {
         guard
-            let url = Bundle.module.url(forResource: name, withExtension: "txt"),
+            let url = Bundle.module.url(forResource: name, withExtension: "md"),
             let contents = try? String(contentsOf: url, encoding: .utf8)
         else {
-            fatalError("Failed to load bundled system prompt template \(name).txt")
+            fatalError("Failed to load bundled system prompt template \(name).md")
         }
         return contents
     }
@@ -112,12 +113,38 @@ func loadSystemPromptTemplates() -> [ClientKind: String] {
     ]
 }
 
+/// Loads the bundled platform instruction block for the current operating
+/// system. The files are plain markdown next to the system prompt templates
+/// so they can be edited without touching code.
+func loadPlatformInstructions() -> String {
+    let name: String
+    #if os(macOS)
+    name = "platform_instructions_mac"
+    #elseif os(Windows)
+    name = "platform_instructions_windows"
+    #elseif os(Linux)
+    name = "platform_instructions_linux"
+    #else
+    return ""
+    #endif
+    guard
+        let url = Bundle.module.url(forResource: name, withExtension: "md"),
+        let contents = try? String(contentsOf: url, encoding: .utf8)
+    else {
+        fatalError("Failed to load bundled platform instructions \(name).md")
+    }
+    return contents
+}
+
 /// Resolves the bundled skill files from the compiled resources. The build
 /// system flattens package resource directories into the bundle root, so
 /// each bundled skill is a uniquely named `.md` file (e.g. `git-commit.md`);
 /// two skills may not share a file name.
 func bundledSkillFiles() -> [URL] {
-    var files = Bundle.module.urls(forResourcesWithExtension: "md", subdirectory: nil) ?? []
+    // The platform instruction files are also bundled .md files at the root,
+    // but they are prompt blocks, not skills.
+    var files = (Bundle.module.urls(forResourcesWithExtension: "md", subdirectory: nil) ?? [])
+        .filter { !$0.lastPathComponent.hasPrefix("platform_instructions_") }
     // Some toolchains preserve the source layout (skills/*.md) instead of
     // flattening; pick those up too.
     if let nested = Bundle.module.urls(forResourcesWithExtension: "md", subdirectory: "skills") {

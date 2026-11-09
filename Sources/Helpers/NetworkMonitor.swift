@@ -1,12 +1,14 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // NetworkMonitor.swift
 //
 
 import Foundation
+#if canImport(Network)
 import Network
+#endif
 
 /// Tracks the machine's network connectivity using ``NWPathMonitor`` so
 /// internet-dependent tools can fail fast with a clear message instead of
@@ -14,11 +16,16 @@ import Network
 ///
 /// Detection is interface-level (e.g. Wi-Fi shut off), not an internet
 /// reachability probe: a satisfied path is treated as online.
+///
+/// On platforms without the Network framework (e.g. Windows) monitoring is
+/// unavailable, so the monitor fails open and always reports online.
 public actor NetworkMonitor {
     public static let shared = NetworkMonitor()
 
+    #if canImport(Network)
     private let monitor = NWPathMonitor()
-    private let queue = DispatchQueue(label: "com.terrapincode.network-monitor")
+    private let queue = DispatchQueue(label: "com.terrapin.network-monitor")
+    #endif
     // Fail open: assume online until the first path update says otherwise,
     // so tools are never blocked before monitoring has produced a result.
     private var online = true
@@ -30,11 +37,13 @@ public actor NetworkMonitor {
     public func start() {
         guard !started else { return }
         started = true
+        #if canImport(Network)
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             Task { await self.update(online: path.status == .satisfied) }
         }
         monitor.start(queue: queue)
+        #endif
     }
 
     /// Whether the machine currently has a network path (Wi-Fi, Ethernet,

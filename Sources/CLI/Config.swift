@@ -1,5 +1,5 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // Config.swift
@@ -18,7 +18,7 @@ struct Config: Sendable {
     /// Sessions are pinned to a slot so the KV cache is reused across turns.
     let slots: Int
     /// When true, each request body sent to the AI server is written to
-    /// ~/.terrapincode/logs/NNNN.json for prefix-stability debugging.
+    /// ~/.terrapin/logs/NNNN.json for prefix-stability debugging.
     let debugLog: Bool
     /// Client assumed when the connecting ACP client does not identify
     /// itself via `clientInfo` in the `initialize` request.
@@ -97,7 +97,14 @@ struct Config: Sendable {
     private static func skillDirectories(args: [String], env: [String: String]) -> [String] {
         var directories = argValues("--skills-dir", in: args)
         if let envValue = env["AI_SKILLS_DIR"] {
-            directories.append(contentsOf: envValue.split(separator: ":").map(String.init))
+            // PATH-style separator: ':' on POSIX, ';' on Windows (':' is the
+            // drive-letter separator there and would split paths in half).
+            #if os(Windows)
+            let separator = ";"
+            #else
+            let separator = ":"
+            #endif
+            directories.append(contentsOf: envValue.split(separator: separator).map(String.init))
         }
         var seen = Set<String>()
         return directories.filter { seen.insert($0).inserted }

@@ -1,5 +1,5 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // XcodeMCPBridgeClientTests.swift

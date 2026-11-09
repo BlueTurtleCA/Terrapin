@@ -1,5 +1,5 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // ClientKind.swift
@@ -25,9 +25,17 @@ public enum ClientKind: Sendable, Hashable {
         fallback: ClientKind = .xcode
     ) -> ClientKind {
         let name = clientInfo?["name"] as? String ?? ""
+
+        // Xcode only runs on Apple platforms, so on Windows the client can
+        // never be Xcode: skip the Xcode checks and coerce the fallback to
+        // generic, so the generic (non-Xcode) system prompt is used.
+        #if os(Windows)
+        let effectiveFallback: ClientKind = .generic(name: "unknown")
+        #else
+        let effectiveFallback = fallback
+
         let title = clientInfo?["title"] as? String ?? ""
         let identity = (name + " " + title).lowercased()
-
         if identity.contains("xcode") {
             return .xcode
         }
@@ -36,9 +44,10 @@ public enum ClientKind: Sendable, Hashable {
         if environment.keys.contains(where: { $0.uppercased().contains("XCODE") }) {
             return .xcode
         }
+        #endif
 
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmedName.isEmpty else { return fallback }
+        guard !trimmedName.isEmpty else { return effectiveFallback }
         return .generic(name: trimmedName)
     }
 }

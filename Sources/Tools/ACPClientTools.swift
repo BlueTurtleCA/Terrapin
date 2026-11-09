@@ -1,5 +1,5 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // ACPWrapperTools.swift
@@ -276,6 +276,18 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
         )
     )
     
+    // The shell used to interpret full command lines (pipes, redirects,
+    // multiple statements, ...) when the model puts them in `command`.
+    #if os(Windows)
+    private static let shellCommand = "powershell.exe"
+    private static let shellArgs: [String] = ["-NoProfile", "-Command"]
+    private static let shellInvocation = "powershell -Command"
+    #else
+    private static let shellCommand = "/bin/sh"
+    private static let shellArgs: [String] = ["-c"]
+    private static let shellInvocation = "/bin/sh -c"
+    #endif
+
     private static let terminalDefinitions: [ToolDefinition] = [
         ToolDefinition(
             function: FunctionDefinition(
@@ -286,7 +298,7 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
                     "properties": AnySendable([
                         "command": AnySendable([
                             "type": AnySendable("string"),
-                            "description": AnySendable("The program to execute, e.g. 'git' — not a full command line; put arguments in `args`. For shell pipelines, redirects, command substitution, or multiple statements, put the entire line here (e.g. 'git status | grep modified') and leave `args` empty; it is then run via /bin/sh -c.")
+                            "description": AnySendable("The program to execute, e.g. 'git' — not a full command line; put arguments in `args`. For shell pipelines, redirects, command substitution, or multiple statements, put the entire line here (e.g. 'git status | grep modified') and leave `args` empty; it is then run via \(ACPClientTools.shellInvocation).")
                         ]),
                         "args": AnySendable([
                             "type": AnySendable("array"),
@@ -922,10 +934,10 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
         // A bare program name (the intended `command` value) has no spaces and
         // no shell metacharacters. If the agent instead put a full shell
         // command line in `command` (pipes, redirects, command substitution,
-        // multiple statements, ...), re-express it as `/bin/sh -c "<line>"` so
-        // the shell interprets it. Without this, the client tries to exec the
-        // whole string as a single program name and fails with
-        // "env: <line>: No such file or directory".
+        // multiple statements, ...), re-express it as a shell invocation
+        // (`/bin/sh -c "<line>"` on POSIX, `powershell -Command "<line>"` on
+        // Windows) so the shell interprets it. Without this, the client tries
+        // to exec the whole string as a single program name and fails.
         var finalCommand = command
         var finalArgs: [String] = commandArgs
         if Self.looksLikeShellCommandLine(command) {
@@ -933,8 +945,8 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
             if !commandArgs.isEmpty {
                 line += " " + commandArgs.joined(separator: " ")
             }
-            finalCommand = "/bin/sh"
-            finalArgs = ["-c", line]
+            finalCommand = Self.shellCommand
+            finalArgs = Self.shellArgs + [line]
         }
 
         var params: [String: Any] = [
@@ -1227,7 +1239,10 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
               let content = try? String(contentsOfFile: path, encoding: .utf8)
         else { return nil }
         
-        let lines = content.components(separatedBy: "\n")
+        // Normalize CRLF line endings so lines don't carry a trailing \r.
+        let lines = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
         let start = max((line ?? 1) - 1, 0)
         guard start < lines.count else { return "" }
         let end = limit.map { min(start + max($0, 0), lines.count) } ?? lines.count
@@ -1282,22 +1297,56 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
+    /// Replaces backslash separators with forward slashes. On Windows both
+    /// characters are path separators (and "\" is never a file-name
+    /// character), so the rewrite is always safe; on POSIX "\" is a legal
+    /// file-name character and is left alone.
+    private static func normalizedSeparators(_ path: String) -> String {
+        #if os(Windows)
+        return path.replacingOccurrences(of: "\\", with: "/")
+        #else
+        return path
+        #endif
+    }
+    
+    /// True when the path is absolute on the current platform: POSIX paths
+    /// start with "/", Windows paths with a drive letter ("C:\", "C:/") or
+    /// a UNC prefix ("\\server\share").
+    private static func isAbsolutePath(_ path: String) -> Bool {
+        if path.hasPrefix("/") { return true }
+        #if os(Windows)
+        let characters = Array(path)
+        if characters.count >= 3,
+           characters[0].isLetter,
+           characters[1] == ":",
+           characters[2] == "/" || characters[2] == "\\" {
+            return true
+        }
+        if path.hasPrefix("\\\\") { return true }
+        #endif
+        return false
+    }
+    
     private static func resolveWorkspacePath(relativePath: String, workspaceRoot: String) -> String {
         let expandedRaw = (relativePath as NSString).expandingTildeInPath
         let expandedRoot = (workspaceRoot as NSString).expandingTildeInPath
         
         let rootURL = URL(fileURLWithPath: expandedRoot).standardizedFileURL
             
-        // 1. Absolute paths
-        if expandedRaw.hasPrefix("/") {
+        // 1. Absolute paths (POSIX "/..." or Windows "C:\..." / UNC)
+        if Self.isAbsolutePath(expandedRaw) {
             return URL(fileURLWithPath: expandedRaw).standardizedFileURL.path
         }
             
+        // Normalize separators so the prefix check below works on every
+        // platform (the model may write Windows paths with backslashes).
+        let normalized = Self.normalizedSeparators(expandedRaw)
+            
         // 2. Strip redundant workspace name prefix EVEN IF the file doesn't exist yet
-        let rootName = rootURL.lastPathComponent // "TerrapinCode"
-        var cleanRelative = expandedRaw
-        if expandedRaw.hasPrefix("\(rootName)/") {
-            cleanRelative = String(expandedRaw.dropFirst(rootName.count + 1)) // "SUMMARY.md"
+        let rootName = rootURL.lastPathComponent // "Terrapin"
+        var cleanRelative = normalized
+        if normalized.hasPrefix("\(rootName)/") {
+            cleanRelative = String(normalized.dropFirst(rootName.count + 1)) // "SUMMARY.md"
         }
             
         // 3. Resolve clean path against workspace root
@@ -1306,20 +1355,24 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     }
     
     private static func isWithinWorkspace(_ path: String, workspaceRoot: String) -> Bool {
-        let root = URL(fileURLWithPath: (workspaceRoot as NSString).expandingTildeInPath).standardizedFileURL.path
-        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        let root = Self.normalizedSeparators(
+            URL(fileURLWithPath: (workspaceRoot as NSString).expandingTildeInPath).standardizedFileURL.path
+        )
+        let standardized = Self.normalizedSeparators(URL(fileURLWithPath: path).standardizedFileURL.path)
         return standardized == root || standardized.hasPrefix(root + "/")
     }
     
     /// The inverse of resolveWorkspacePath: a workspace-relative path in the
-    /// form the Xcode MCP bridge expects (e.g. "TerrapinCode/Sources/Foo.swift").
+    /// form the Xcode MCP bridge expects (e.g. "Terrapin/Sources/Foo.swift").
     private static func workspaceRelativePath(_ absolutePath: String, workspaceRoot: String) -> String {
         let root = URL(fileURLWithPath: (workspaceRoot as NSString).expandingTildeInPath).standardizedFileURL
         let abs = URL(fileURLWithPath: absolutePath).standardizedFileURL
-        guard abs.path.hasPrefix(root.path + "/") else {
+        let rootPath = Self.normalizedSeparators(root.path)
+        let absPath = Self.normalizedSeparators(abs.path)
+        guard absPath.hasPrefix(rootPath + "/") else {
             return absolutePath
         }
-        let relative = String(abs.path.dropFirst(root.path.count + 1))
+        let relative = String(absPath.dropFirst(rootPath.count + 1))
         return root.lastPathComponent + "/" + relative
     }
     
@@ -1375,10 +1428,12 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     
     /// True when a `command` value is a full shell command line rather than a
     /// bare program name. A program name has no spaces and no shell
-    /// metacharacters; the presence of either means the value needs /bin/sh to
+    /// metacharacters; the presence of either means the value needs a shell to
     /// interpret it (pipes, redirects, command substitution, globs, multiple
-    /// statements, ...). Used to transparently re-express such values as
-    /// `/bin/sh -c "<line>"` so the client's direct exec doesn't fail.
+    /// statements, ...). Used to transparently re-express such values as a
+    /// shell invocation (`/bin/sh -c "<line>"` on POSIX,
+    /// `powershell -Command "<line>"` on Windows) so the client's direct exec
+    /// doesn't fail.
     private static func looksLikeShellCommandLine(_ command: String) -> Bool {
         let shellChars: Set<Character> = [
             " ", "\t", "\n", "|", ";", "&", ">", "<", "$", "`",
@@ -1487,10 +1542,12 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     ) async -> (matches: [String], locations: [[String: Any]], cmd: String) {
         // grep --include only matches file basenames, so a pattern with a
         // directory component (e.g. "Sources/*") can never match. Enumerate
-        // the workspace instead and grep the files whose relative path
-        // matches the glob.
-        var searchTargets = [cwd]
-        if let pattern = pathPattern, !pattern.isEmpty, pattern.contains("/") {
+        // the workspace instead and search the files whose relative path
+        // matches the glob. Both separator styles count as directory
+        // components ("Sources\*" on Windows).
+        let searchTargets: [String]
+        if let pattern = pathPattern, !pattern.isEmpty,
+           pattern.contains("/") || pattern.contains("\\") {
             searchTargets = Self.filesMatchingGlob(pattern, under: cwd)
             if searchTargets.isEmpty {
                 return (
@@ -1499,94 +1556,93 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
                     "grep (no files match '\(pattern)')"
                 )
             }
+        } else if let pattern = pathPattern, !pattern.isEmpty {
+            // A basename-only pattern filters by file name (grep --include).
+            searchTargets = Self.walkFiles(under: cwd)
+                .filter { Self.globMatches(pattern, path: ($0.absolute as NSString).lastPathComponent) }
+                .map(\.absolute)
+        } else {
+            searchTargets = Self.walkFiles(under: cwd).map(\.absolute)
         }
-        
-        let process = Process()
-        let pipe = Pipe()
-        
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-        
-        var arguments = [
-            "-r",
-            "-n",
-            "-H",
-            "-I",
-            "--exclude-dir=.git",
-            "--exclude-dir=.build",
-            "--exclude-dir=DerivedData"
-        ]
         
         // Extended regex by default so `|`, `+`, `?`, ... behave as most
-        // models expect; -F treats the query as a literal string instead.
+        // models expect; literal matching otherwise (grep -F).
+        let regex: NSRegularExpression?
         if isRegex {
-            arguments.append("-E")
+            guard let compiled = try? NSRegularExpression(
+                pattern: query,
+                options: caseSensitive ? [] : [.caseInsensitive]
+            ) else {
+                return (
+                    ["Grep execution failed: invalid regex '\(query)'."],
+                    [],
+                    "grep -E -e \(query)"
+                )
+            }
+            regex = compiled
         } else {
-            arguments.append("-F")
+            regex = nil
         }
-        
-        if !caseSensitive { arguments.append("-i") }
-        if let pattern = pathPattern, !pattern.isEmpty, !pattern.contains("/") {
-            arguments.append(contentsOf: ["--include", pattern])
-        }
-        arguments.append(contentsOf: ["-e", query])
-        arguments.append(contentsOf: searchTargets)
-        
-        process.arguments = arguments
-        process.standardOutput = pipe
         
         // A long explicit file list makes for an unreadable title, so show
         // the glob instead when the search was narrowed to matched files.
+        let flags = "\(isRegex ? "-E" : "-F")\(caseSensitive ? "" : " -i")"
         let commandString: String
         if searchTargets.count > 1, let pattern = pathPattern {
-            commandString = "grep \(isRegex ? "-E" : "-F")\(caseSensitive ? "" : " -i") -e \(query) [\(searchTargets.count) files matching '\(pattern)']"
+            commandString = "grep \(flags) -e \(query) [\(searchTargets.count) files matching '\(pattern)']"
         } else {
-            commandString = (["grep"] + (process.arguments ?? [])).joined(separator: " ")
+            commandString = "grep \(flags) -e \(query) \(cwd)"
         }
         
-        do {
-            try process.run()
-            process.waitUntilExit()
+        var matches: [String] = []
+        var locations: [[String: Any]] = []
+        
+        searchTargetsLoop: for file in searchTargets {
+            // Skip files that are not valid UTF-8 or contain NUL bytes
+            // (grep -I).
+            guard let content = try? String(contentsOfFile: file, encoding: .utf8),
+                  !content.contains("\0")
+            else { continue }
             
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else {
-                return ([], [], commandString)
-            }
-            
-            var matches: [String] = []
-            var locations: [[String: Any]] = []
-            
-            let lines = output.components(separatedBy: .newlines)
-            for line in lines.prefix(100) where !line.isEmpty {
-                matches.append(line)
-                
-                // Format: /Users/.../File.swift:42:let foo = "bar"
-                let parts = line.components(separatedBy: ":")
-                if parts.count >= 3, let lineNumber = Int(parts[1]) {
-                    let rawPath = parts[0]
-                    
-                    // CRITICAL: Guarantee 100% absolute POSIX path for AgentSearch
-                    let absPath = Self.resolveWorkspacePath(relativePath: rawPath, workspaceRoot: cwd)
-                    
-                    locations.append([
-                        "path": absPath,
-                        "line": lineNumber,
-                        "column": 1
-                    ])
+            for (index, line) in content.components(separatedBy: .newlines).enumerated() {
+                let matched: Bool
+                if let regex {
+                    matched = regex.firstMatch(
+                        in: line,
+                        range: NSRange(line.startIndex..., in: line)
+                    ) != nil
+                } else {
+                    matched = caseSensitive
+                        ? line.contains(query)
+                        : line.lowercased().contains(query.lowercased())
                 }
+                guard matched else { continue }
+                
+                let lineNumber = index + 1
+                matches.append("\(file):\(lineNumber):\(line)")
+                locations.append([
+                    "path": file,
+                    "line": lineNumber,
+                    "column": 1
+                ])
+                
+                // Report at most 100 matches, like the grep -r output cap.
+                if matches.count >= 100 { break searchTargetsLoop }
             }
-            
-            return (matches, locations, commandString)
-        } catch {
-            return (["Grep execution failed: \(error.localizedDescription)"], [], commandString)
         }
+        
+        return (matches, locations, commandString)
     }
     
     /// Enumerates the regular files under `directory` (skipping .git, .build
-    /// and DerivedData) whose path relative to `directory` matches the glob
-    /// `pattern`.
-    private static func filesMatchingGlob(_ pattern: String, under directory: String) -> [String] {
+    /// and DerivedData). Returns each file's absolute path plus its path
+    /// relative to `directory` with forward slashes, so glob matching works
+    /// the same on every platform.
+    private static func walkFiles(under directory: String) -> [(absolute: String, relative: String)] {
         let fileManager = FileManager.default
-        let rootURL = URL(fileURLWithPath: directory).standardizedFileURL
+        // Resolve symlinks (e.g. /var -> /private/var on macOS) so the
+        // enumerated paths share the root's prefix.
+        let rootURL = URL(fileURLWithPath: directory).standardizedFileURL.resolvingSymlinksInPath()
         let excludedDirectories: Set<String> = [".git", ".build", "DerivedData"]
         
         guard let enumerator = fileManager.enumerator(
@@ -1596,53 +1652,75 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
             return []
         }
         
-        var matches: [String] = []
+        let rootPath = rootURL.path.replacingOccurrences(of: "\\", with: "/")
+        var files: [(absolute: String, relative: String)] = []
         for case let url as URL in enumerator {
             let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
             if values?.isRegularFile == true {
                 let fileURL = url.standardizedFileURL
-                guard fileURL.path.hasPrefix(rootURL.path + "/") else { continue }
-                let relativePath = String(fileURL.path.dropFirst(rootURL.path.count + 1))
-                if globMatches(pattern, path: relativePath) {
-                    matches.append(fileURL.path)
-                }
+                let normalizedPath = fileURL.path.replacingOccurrences(of: "\\", with: "/")
+                guard normalizedPath.hasPrefix(rootPath + "/") else { continue }
+                files.append((fileURL.path, String(normalizedPath.dropFirst(rootPath.count + 1))))
             } else if values?.isDirectory == true, excludedDirectories.contains(url.lastPathComponent) {
                 enumerator.skipDescendants()
             }
         }
-        return matches
+        return files
+    }
+    
+    /// Enumerates the regular files under `directory` (skipping .git, .build
+    /// and DerivedData) whose path relative to `directory` matches the glob
+    /// `pattern`.
+    private static func filesMatchingGlob(_ pattern: String, under directory: String) -> [String] {
+        walkFiles(under: directory).compactMap { file in
+            globMatches(pattern, path: file.relative) ? file.absolute : nil
+        }
     }
     
     /// Matches `path` against a shell-style glob: `*` matches any run of
-    /// characters except `/`, `**` matches anything including `/`, `?`
-    /// matches a single character except `/`, and every other character is
-    /// literal.
+    /// characters except a path separator, `**` matches anything including
+    /// separators, `?` matches a single character except a separator, and
+    /// every other character is literal.
     private static func globMatches(_ pattern: String, path: String) -> Bool {
         guard let regex = globRegex(for: pattern) else { return false }
         return regex.firstMatch(in: path, range: NSRange(path.startIndex..., in: path)) != nil
     }
     
+    /// Regex classes for `*` (any run) and `?` (single character): anything
+    /// except a path separator. Windows treats both "/" and "\" as
+    /// separators; POSIX only "/".
+    #if os(Windows)
+    private static let globSingleSegment = "[^/\\\\]*"
+    private static let globSingleChar = "[^/\\\\]"
+    #else
+    private static let globSingleSegment = "[^/]*"
+    private static let globSingleChar = "[^/]"
+    #endif
+    
     private static func globRegex(for pattern: String) -> NSRegularExpression? {
+        // The paths being matched are slash-normalized, so backslash
+        // separators in the pattern mean the same as forward slashes.
+        let normalizedPattern = Self.normalizedSeparators(pattern)
         var source = "^"
-        var index = pattern.startIndex
-        while index < pattern.endIndex {
-            let character = pattern[index]
+        var index = normalizedPattern.startIndex
+        while index < normalizedPattern.endIndex {
+            let character = normalizedPattern[index]
             switch character {
             case "*":
-                let next = pattern.index(after: index)
-                if next < pattern.endIndex, pattern[next] == "*" {
+                let next = normalizedPattern.index(after: index)
+                if next < normalizedPattern.endIndex, normalizedPattern[next] == "*" {
                     source += ".*"
-                    index = pattern.index(after: next)
+                    index = normalizedPattern.index(after: next)
                 } else {
-                    source += "[^/]*"
+                    source += Self.globSingleSegment
                     index = next
                 }
             case "?":
-                source += "[^/]"
-                index = pattern.index(after: index)
+                source += Self.globSingleChar
+                index = normalizedPattern.index(after: index)
             default:
                 source += NSRegularExpression.escapedPattern(for: String(character))
-                index = pattern.index(after: index)
+                index = normalizedPattern.index(after: index)
             }
         }
         source += "$"
@@ -1650,22 +1728,27 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     }
     
     private func runListDirectory(_ path: String) -> String {
-        let process = Process()
-        let pipe = Pipe()
-        
-        process.executableURL = URL(fileURLWithPath: "/bin/ls")
-        process.arguments = ["-l", path]
-        process.standardOutput = pipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return output.isEmpty ? "(empty directory)" : output
-        } catch {
-            return "Error listing directory '\(path)': \(error.localizedDescription)"
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(atPath: path) else {
+            return "Error listing directory '\(path)': no such directory"
         }
+        guard !entries.isEmpty else { return "(empty directory)" }
+        
+        var lines: [String] = []
+        for entry in entries.sorted() where !entry.hasPrefix(".") {
+            let fullPath = (path as NSString).appendingPathComponent(entry)
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: fullPath, isDirectory: &isDirectory) else {
+                continue
+            }
+            if isDirectory.boolValue {
+                lines.append("\(entry)/ (directory)")
+            } else {
+                let attributes = (try? fileManager.attributesOfItem(atPath: fullPath)) ?? [:]
+                let size = (attributes[.size] as? Int) ?? 0
+                lines.append("\(entry) (\(size) bytes)")
+            }
+        }
+        return lines.isEmpty ? "(empty directory)" : lines.joined(separator: "\n")
     }
 }

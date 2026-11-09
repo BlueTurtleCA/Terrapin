@@ -1,19 +1,19 @@
 <p align="center">
-  <img src="assets/terrapincode.jpg" width="256" alt="TerrapinCode">
+  <img src="assets/terrapin.jpg" width="256" alt="Terrapin">
 </p>
 
-# TerrapinCode
+# Terrapin
 
-TerrapinCode is an agent-client protocol server for Xcode 27 that runs against any OpenAI-compatible endpoint, including local models. Build your own custom harness.
+Terrapin is an agent-client protocol server for Xcode 27 that runs against any OpenAI-compatible endpoint, including local models. Build your own custom harness.
 
-## What is TerrapinCode?
+## What is Terrapin?
 
-TerrapinCode is a self-hosted coding agent that plugs directly into Xcode. It speaks the **Agent Client Protocol (ACP)** over `stdin`/`stdout`, so Xcode can launch it as a custom agent and drive it with plain JSON-RPC. On the other side, it talks to **any OpenAI-compatible chat-completions server** — `llama.cpp`, LM Studio, an `mlx` server, or a remote endpoint — which means you can run the whole thing on your own hardware with a local model.
+Terrapin is a self-hosted coding agent that plugs directly into Xcode. It speaks the **Agent Client Protocol (ACP)** over `stdin`/`stdout`, so Xcode can launch it as a custom agent and drive it with plain JSON-RPC. On the other side, it talks to **any OpenAI-compatible chat-completions server** — `llama.cpp`, LM Studio, an `mlx` server, or a remote endpoint — which means you can run the whole thing on your own hardware with a local model.
 
 In short:
 
 ```
-Xcode  ⇄  (ACP / JSON-RPC)  ⇄  TerrapinCode  ⇄  (OpenAI-compatible HTTP)  ⇄  your model server
+Xcode  ⇄  (ACP / JSON-RPC)  ⇄  Terrapin  ⇄  (OpenAI-compatible HTTP)  ⇄  your model server
 ```
 
 ### What it can do
@@ -24,13 +24,13 @@ Xcode  ⇄  (ACP / JSON-RPC)  ⇄  TerrapinCode  ⇄  (OpenAI-compatible HTTP)  
 - **Stream** answer and thinking tokens to Xcode as they are generated.
 - **Stay within the model's context window** by auto-detecting the server's context length and compacting older history when it gets close.
 - **Reuse the server's KV cache** by pinning each session to a stable slot (llama.cpp), so follow-up turns only process the delta.
-- **Resume previous sessions** — session state (working directory + chat history) is persisted to `~/.terrapincode/sessions/`, so `session/load` restores a conversation after a restart. Sessions not updated for 30 days are removed automatically on startup.
+- **Resume previous sessions** — session state (working directory + chat history) is persisted to `~/.terrapin/sessions/`, so `session/load` restores a conversation after a restart. Sessions not updated for 30 days are removed automatically on startup.
 - **Pick up project instructions** from an `AGENTS.md` file in the working directory.
 - **Load skills** — reusable instruction packs (`SKILL.md` files) discovered from the project, user, and bundled directories, and loaded on demand via the `use_skill` tool.
 
 ## How it works
 
-When Xcode sends a prompt, TerrapinCode:
+When Xcode sends a prompt, Terrapin:
 
 1. Loads (or creates) the session's chat history and builds the system prompt from the bundled template, injecting the working directory and any `AGENTS.md` instructions.
 2. Opens the Xcode workspace up front so workspace tools work on the first call.
@@ -38,12 +38,12 @@ When Xcode sends a prompt, TerrapinCode:
 4. If the model returns tool calls, it executes each one (Xcode MCP tools or web tools), appends the results to the history, and loops back to step 3.
 5. When the model returns a final answer, it streams the text to Xcode and saves the updated history.
 
-The Xcode tools are not hard-coded. TerrapinCode spawns `xcrun mcpbridge`, performs the MCP handshake, and pulls the live tool list from Xcode, so it automatically supports whatever tools your Xcode build exposes.
+The Xcode tools are not hard-coded. Terrapin spawns `xcrun mcpbridge`, performs the MCP handshake, and pulls the live tool list from Xcode, so it automatically supports whatever tools your Xcode build exposes.
 
 ## Requirements
 
-- macOS 14 or later
-- Xcode 27 (provides `xcrun mcpbridge` and the ACP agent host)
+- macOS 14 or later, or Windows
+- Xcode 27 for the Xcode integration (provides `xcrun mcpbridge` and the ACP agent host); on Windows the generic client template is used automatically
 - Swift 6.4 toolchain
 - A running OpenAI-compatible server (`llama.cpp`, LM Studio, `mlx` server, etc.)
 
@@ -53,15 +53,15 @@ The Xcode tools are not hard-coded. TerrapinCode spawns `xcrun mcpbridge`, perfo
 swift build
 ```
 
-The executable is produced at `.build/debug/terrapincode`. You can also run it directly with:
+The executable is produced at `.build/debug/terrapin`. You can also run it directly with:
 
 ```sh
-swift run terrapincode
+swift run terrapin
 ```
 
 ## Configuration
 
-TerrapinCode is configured with CLI arguments, which take precedence over environment variables.
+Terrapin is configured with CLI arguments, which take precedence over environment variables.
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
@@ -69,9 +69,9 @@ TerrapinCode is configured with CLI arguments, which take precedence over enviro
 | `--model` | `AI_MODEL` | `default` | Model name sent in each chat-completion request. |
 | `--context-window` | `AI_CONTEXT_WINDOW` | auto-detected | Override the context window size (in tokens). By default it is read from the server's `/v1/models` endpoint. |
 | `--slots` | `AI_SLOTS` | `1` | Number of server-side context slots (llama.cpp `-np` / `n_parallel`). Sessions are pinned to a slot so the KV cache is reused across turns. |
-| `--debug-log` | `AI_DEBUG_LOG` | `false` | Write each request body to `~/.terrapincode/logs/NNNN.json` for prefix-stability debugging. |
+| `--debug-log` | `AI_DEBUG_LOG` | `false` | Write each request body to `~/.terrapin/logs/NNNN.json` for prefix-stability debugging. |
 | `--default-client` | `AI_DEFAULT_CLIENT` | `xcode` | Client assumed when the connecting ACP client does not identify itself (`xcode` or `generic`). |
-| `--skills-dir` | `AI_SKILLS_DIR` | none | Additional skill directories. The flag is repeatable; the environment variable is colon-separated. |
+| `--skills-dir` | `AI_SKILLS_DIR` | none | Additional skill directories. The flag is repeatable; the environment variable is colon-separated on macOS/Linux and semicolon-separated on Windows. |
 
 One additional, optional variable:
 
@@ -87,17 +87,17 @@ One additional, optional variable:
    llama-server -m /path/to/model.gguf -np 4 -c 32768 --port 8080
    ```
 
-2. **Run TerrapinCode**, pointing it at the server:
+2. **Run Terrapin**, pointing it at the server:
 
    ```sh
-   terrapincode --server http://localhost:8080 --model default --slots 4
+   terrapin --server http://localhost:8080 --model default --slots 4
    ```
 
 3. **Point Xcode at it.** Xcode 27 launches the binary as a custom ACP agent and communicates over `stdin`/`stdout`. From there you can ask it to read, edit, build, and test your project.
 
 ### ACP protocol
 
-TerrapinCode reads one JSON-RPC message per line from `stdin` and writes JSON-RPC responses and notifications to `stdout`. It handles:
+Terrapin reads one JSON-RPC message per line from `stdin` and writes JSON-RPC responses and notifications to `stdout`. It handles:
 
 | Method | Behavior |
 | --- | --- |
@@ -110,18 +110,18 @@ TerrapinCode reads one JSON-RPC message per line from `stdin` and writes JSON-RP
 
 ### Client detection
 
-On `initialize`, TerrapinCode reads the client's `clientInfo` (name/title) to identify the connecting client. Xcode gets the Xcode-specific system prompt and the `xcrun mcpbridge` toolset (spawned lazily on the first `session/new`); any other ACP client (VS Code, Zed, JetBrains, ...) gets a generic prompt and the client-agnostic tools (native ACP file tools + web tools). When a client does not identify itself, `--default-client` decides.
+On `initialize`, Terrapin reads the client's `clientInfo` (name/title) to identify the connecting client. Xcode gets the Xcode-specific system prompt and the `xcrun mcpbridge` toolset (spawned lazily on the first `session/new`); any other ACP client (VS Code, Zed, JetBrains, ...) gets a generic prompt and the client-agnostic tools (native ACP file tools + web tools). When a client does not identify itself, `--default-client` decides.
 
 ## Tools
 
-- **Xcode MCP tools** — discovered at runtime from `xcrun mcpbridge` (read, edit, build, test, debug, previews, and more). TerrapinCode auto-injects the `workspaceIdentifier` and `tabIdentifier` so the model does not have to supply them.
+- **Xcode MCP tools** — discovered at runtime from `xcrun mcpbridge` (read, edit, build, test, debug, previews, and more). Terrapin auto-injects the `workspaceIdentifier` and `tabIdentifier` so the model does not have to supply them.
 - **`web_fetch`** — fetches an HTTP/HTTPS URL and returns its text content.
 - **`web_search`** — searches the live web (Tavily or DuckDuckGo).
 - **`use_skill`** — loads the full instructions of a skill from the `AVAILABLE SKILLS` catalog in the system prompt.
 
 ## Skills
 
-TerrapinCode supports **skills**: reusable instruction packs stored as markdown files. A skill is a directory containing a `SKILL.md` file with YAML frontmatter:
+Terrapin supports **skills**: reusable instruction packs stored as markdown files. A skill is a directory containing a `SKILL.md` file with YAML frontmatter:
 
 ```markdown
 ---
@@ -137,8 +137,8 @@ Skills are discovered from these locations (highest precedence first; the first 
 
 | Location | Scope |
 | --- | --- |
-| `<workspace>/.terrapincode/skills/<name>/` | Project — commit to the repo to share with the team |
-| `~/.terrapincode/skills/<name>/` | User — personal, applies to all projects |
+| `<workspace>/.terrapin/skills/<name>/` | Project — commit to the repo to share with the team |
+| `~/.terrapin/skills/<name>/` | User — personal, applies to all projects |
 | `--skills-dir` / `AI_SKILLS_DIR` (colon-separated) | Extra directories |
 | Bundled `Resources/skills/<name>.md` | Shipped with the binary |
 
@@ -149,15 +149,15 @@ Bundled skills use a flat layout — one uniquely named `.md` file per skill (e.
 To create a custom skill:
 
 ```sh
-mkdir -p ~/.terrapincode/skills/git-release-notes
-# then write ~/.terrapincode/skills/git-release-notes/SKILL.md
+mkdir -p ~/.terrapin/skills/git-release-notes
+# then write ~/.terrapin/skills/git-release-notes/SKILL.md
 ```
 
 New skills are picked up when a new session starts.
 
-## Testing TerrapinCode
+## Testing Terrapin
 
-To test that TerrapinCode can successfully connect with the AI server, enter the following via stdin:
+To test that Terrapin can successfully connect with the AI server, enter the following via stdin:
 
 ```
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
@@ -190,12 +190,12 @@ To compact a session's history on demand, send `/compact` as a prompt. Automatic
 ## Project structure
 
 ```
-TerrapinCode/
+Terrapin/
 ├── Package.swift
 ├── LICENSE
 ├── README.md
 ├── assets/
-│   └── terrapincode.jpg               # README logo
+│   └── terrapin.jpg               # README logo
 └── Sources/
     ├── Agent/
     │   ├── Agent.swift                  # Agentic execution loop
@@ -206,8 +206,11 @@ TerrapinCode/
     │   ├── ACPServer.swift              # ACP JSON-RPC server over stdin/stdout
     │   ├── Config.swift                 # CLI args + env var configuration
     │   └── Resources/
-    │       ├── system_prompt_xcode.txt  # Xcode-specific system prompt template
-    │       ├── system_prompt_generic.txt# Generic (non-Xcode) system prompt template
+    │       ├── system_prompt_xcode.md   # Xcode-specific system prompt template
+    │       ├── system_prompt_generic.md # Generic (non-Xcode) system prompt template
+    │       ├── platform_instructions_mac.md     # macOS platform block for {{PLATFORM_INSTRUCTIONS}}
+    │       ├── platform_instructions_windows.md # Windows platform block for {{PLATFORM_INSTRUCTIONS}}
+    │       ├── platform_instructions_linux.md   # Linux platform block for {{PLATFORM_INSTRUCTIONS}}
     │       └── skills/                  # Bundled skills (one <name>.md per skill)
     ├── Enums/
     │   └── MCPError.swift

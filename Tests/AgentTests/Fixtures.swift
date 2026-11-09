@@ -1,5 +1,5 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // Fixtures.swift
@@ -193,7 +193,7 @@ final class TempDirectory: @unchecked Sendable {
 
     init() {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("terrapincode-tests-\(UUID().uuidString)")
+            .appendingPathComponent("terrapin-tests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         self.url = url
     }
@@ -376,8 +376,8 @@ func makeStubSession() -> URLSession {
 /// The standard test templates: one per client kind, with every placeholder
 /// separated by "|" so individual blocks are easy to assert on.
 let testTemplates: [ClientKind: String] = [
-    .xcode: "XCODE {{CWD}}|{{TERMINAL_TOOLS}}|{{NETWORK_STATUS}}|{{SKILLS}}|{{CUSTOM_INSTRUCTIONS}}",
-    .generic(name: "unknown"): "GENERIC {{CWD}}|{{TERMINAL_TOOLS}}|{{NETWORK_STATUS}}|{{SKILLS}}|{{CUSTOM_INSTRUCTIONS}}",
+    .xcode: "XCODE {{CWD}}|{{PLATFORM_INSTRUCTIONS}}|{{TERMINAL_TOOLS}}|{{NETWORK_STATUS}}|{{SKILLS}}|{{CUSTOM_INSTRUCTIONS}}",
+    .generic(name: "unknown"): "GENERIC {{CWD}}|{{PLATFORM_INSTRUCTIONS}}|{{TERMINAL_TOOLS}}|{{NETWORK_STATUS}}|{{SKILLS}}|{{CUSTOM_INSTRUCTIONS}}",
 ]
 
 /// A skill used to assert the catalog block in the system prompt.
@@ -438,6 +438,7 @@ func makeAgentHarness(
     results: [String: String] = [:],
     contextWindow: Int = 10_000,
     templates: [ClientKind: String] = testTemplates,
+    platformInstructions: String = "",
     skills: [Skill] = [],
     slotCount: Int = 1
 ) -> AgentHarness {
@@ -453,6 +454,7 @@ func makeAgentHarness(
         sessionStore: store,
         contextWindow: contextWindow,
         systemPromptTemplates: templates,
+        platformInstructions: platformInstructions,
         skillCatalog: { _ in SkillCatalog(skills: skills) },
         logger: NoOpLogger(),
         slotCount: slotCount,

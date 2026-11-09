@@ -4,13 +4,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "TerrapinCode",
+    name: "Terrapin",
     platforms: [
         .macOS(.v14)
     ],
     products: [
         .executable(
-            name: "terrapincode",
+            name: "terrapin",
             targets: ["CLI"]
         )
     ],
@@ -37,8 +37,11 @@ let package = Package(
             name: "CLI",
             dependencies: ["Logger", "Stores", "Tools", "Enums", "Helpers", "Agent"],
             resources: [
-                .process("Resources/system_prompt_xcode.txt"),
-                .process("Resources/system_prompt_generic.txt"),
+                .process("Resources/system_prompt_xcode.md"),
+                .process("Resources/system_prompt_generic.md"),
+                .process("Resources/platform_instructions_mac.md"),
+                .process("Resources/platform_instructions_windows.md"),
+                .process("Resources/platform_instructions_linux.md"),
                 .process("Resources/skills")
             ]
         ),

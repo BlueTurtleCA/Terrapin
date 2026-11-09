@@ -1,5 +1,5 @@
 //
-// TerrapinCode
+// Terrapin
 // Copyright (C) 2026 Blue Turtle Corporation
 // Author: David Gill
 // Agent.swift
@@ -19,6 +19,7 @@ public struct Agent: Sendable {
     private let sessionStore: SessionStore
     private let contextWindow: Int
     private let systemPromptTemplates: [ClientKind: String]
+    private let platformInstructions: String
     private let skillCatalog: @Sendable (String) -> SkillCatalog
     private let logger: Loggable
     private let slotCount: Int
@@ -30,6 +31,7 @@ public struct Agent: Sendable {
         sessionStore: SessionStore,
         contextWindow: Int,
         systemPromptTemplates: [ClientKind: String],
+        platformInstructions: String = "",
         skillCatalog: @escaping @Sendable (String) -> SkillCatalog = { _ in SkillCatalog(skills: []) },
         logger: Loggable,
         slotCount: Int = 1,
@@ -40,6 +42,7 @@ public struct Agent: Sendable {
         self.sessionStore = sessionStore
         self.contextWindow = contextWindow
         self.systemPromptTemplates = systemPromptTemplates
+        self.platformInstructions = platformInstructions
         self.skillCatalog = skillCatalog
         self.logger = logger
         self.slotCount = slotCount
@@ -527,6 +530,7 @@ public struct Agent: Sendable {
 
         return template
             .replacingOccurrences(of: "{{CWD}}", with: cwd)
+            .replacingOccurrences(of: "{{PLATFORM_INSTRUCTIONS}}", with: platformInstructions)
             .replacingOccurrences(of: "{{TERMINAL_TOOLS}}", with: terminalToolsBlock)
             .replacingOccurrences(of: "{{NETWORK_STATUS}}", with: networkStatusBlock)
             .replacingOccurrences(of: "{{SKILLS}}", with: skillsBlock)
