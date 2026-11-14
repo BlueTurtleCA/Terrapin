@@ -7,6 +7,7 @@
 
 import Foundation
 import Testing
+import Stores
 
 @testable import Agent
 
@@ -110,5 +111,58 @@ struct AgentPromptTests {
         await harness.run(prompt: "hi", client: .generic(name: "Zed"), recorder: recorder)
 
         #expect(systemPrompt(harness).hasPrefix("GENERIC "))
+    }
+
+    // Templates for the vision tests: every placeholder separated by "|", so
+    // the built prompt splits into [CWD, NATIVE_TOOLS, VISION_STATUS].
+    private let visionTemplates: [ClientKind: String] = [
+        .xcode: "XCODE {{CWD}}|{{NATIVE_TOOLS}}|{{VISION_STATUS}}",
+        .generic(name: "unknown"): "GENERIC {{CWD}}|{{NATIVE_TOOLS}}|{{VISION_STATUS}}",
+    ]
+
+    @Test("when the model cannot see, the prompt stops advertising image reads")
+    func visionDisabledPrompt() async {
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [.response(LLMResponse(content: "ok"))]),
+            templates: visionTemplates,
+            supportsVision: false
+        )
+        let recorder = Recorder()
+        await harness.run(prompt: "hi", recorder: recorder)
+
+        let parts = blocks(systemPrompt(harness))
+        #expect(parts[1].contains("read_file (for reading text files from disk)"))
+        #expect(parts[1].contains("you can see") == false)
+        #expect(parts[2].contains("### VISION STATUS"))
+        #expect(parts[2].contains("does not support vision"))
+    }
+
+    @Test("when the model can see, the prompt keeps the image wording")
+    func visionEnabledPrompt() async {
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [.response(LLMResponse(content: "ok"))]),
+            templates: visionTemplates,
+            supportsVision: true
+        )
+        let recorder = Recorder()
+        await harness.run(prompt: "hi", recorder: recorder)
+
+        let parts = blocks(systemPrompt(harness))
+        #expect(parts[1].contains("images you can see"))
+        #expect(parts[2].isEmpty)
+    }
+
+    @Test("when vision support is unknown, the prompt keeps the image wording")
+    func visionUnknownPrompt() async {
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [.response(LLMResponse(content: "ok"))]),
+            templates: visionTemplates
+        )
+        let recorder = Recorder()
+        await harness.run(prompt: "hi", recorder: recorder)
+
+        let parts = blocks(systemPrompt(harness))
+        #expect(parts[1].contains("images you can see"))
+        #expect(parts[2].isEmpty)
     }
 }

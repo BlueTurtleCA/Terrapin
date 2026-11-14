@@ -51,7 +51,7 @@ public actor XcodeMCPBridgeClient: ToolProvider {
     ]
     
     public func execute(name: String, argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void)
-        async -> String
+        async -> ToolResult
     {
         let callId = "call_" + UUID().uuidString
         let (kind, title) = categorizeMCPTool(name: name, argsJSON: argsJSON)
@@ -87,7 +87,7 @@ public actor XcodeMCPBridgeClient: ToolProvider {
             ]
         ])
         
-        return result
+        return ToolResult(result)
     }
 
     /// Opens the Xcode workspace for `cwd` before the agent loop so that

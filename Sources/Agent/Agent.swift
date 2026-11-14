@@ -24,6 +24,10 @@ public struct Agent: Sendable {
     private let logger: Loggable
     private let slotCount: Int
     private let networkMonitor: NetworkMonitor
+    /// The server's explicit statement about the model's vision support
+    /// (from /v1/models); nil when the server does not report it. When the
+    /// server says no, the prompt stops advertising image reads.
+    private let supportsVision: Bool?
 
     public init(
         llmClient: LLMClient,
@@ -35,7 +39,8 @@ public struct Agent: Sendable {
         skillCatalog: @escaping @Sendable (String) -> SkillCatalog = { _ in SkillCatalog(skills: []) },
         logger: Loggable,
         slotCount: Int = 1,
-        networkMonitor: NetworkMonitor = .shared
+        networkMonitor: NetworkMonitor = .shared,
+        supportsVision: Bool? = nil
     ) {
         self.llmClient = llmClient
         self.toolRegistry = toolRegistry
@@ -47,6 +52,7 @@ public struct Agent: Sendable {
         self.logger = logger
         self.slotCount = slotCount
         self.networkMonitor = networkMonitor
+        self.supportsVision = supportsVision
     }
 
     /// Runs a full agent turn for `prompt` within `sessionId`.
@@ -104,6 +110,12 @@ public struct Agent: Sendable {
             )
         )
 
+        // Seed the occupancy base from the last known size of the saved
+        // history, so the first compaction check of a new turn decides on
+        // server-measured tokens rather than the character estimate.
+        var actualBaseTokens = await sessionStore.lastUsageTokens(for: sessionId)
+        var actualBaseCount = history.count
+
         // Notify the model when the network state changed since the last
         // turn: web tools are useless while offline, and the model should
         // know when the connection comes back.
@@ -141,19 +153,32 @@ public struct Agent: Sendable {
             currentTurn += 1
 
             // Compact history if approaching context window limit, and tell
-            // the client when it happens (it is otherwise invisible).
-            let compaction = ContextManager.compactHistory(history, maxTokens: contextWindow)
+            // the client when it happens (it is otherwise invisible). When
+            // the server has reported usage, decide on real token counts
+            // (measured base plus estimated additions since), not the
+            // character estimate alone.
+            let compaction = ContextManager.compactHistory(
+                history,
+                maxTokens: contextWindow,
+                knownTokens: actualBaseTokens.map {
+                    Self.knownTokens(base: $0, baseCount: actualBaseCount, history: history)
+                }
+            )
             let usagePercent = contextWindow > 0
                 ? Double(compaction.tokensBefore) / Double(contextWindow) * 100
                 : 0
             logger.debug(
-                "Context: \(compaction.tokensBefore)/\(contextWindow) estimated tokens (\(String(format: "%.1f", usagePercent))%) — session \(sessionId)"
+                "Context: \(compaction.tokensBefore)/\(contextWindow) tokens (\(String(format: "%.1f", usagePercent))%) — session \(sessionId)"
             )
             history = compaction.messages
             if compaction.compacted {
                 logger.debug(
-                    "Compacted history: removed \(compaction.messagesRemoved) messages (\(compaction.tokensBefore) -> \(compaction.tokensAfter) estimated tokens) — session \(sessionId)"
+                    "Compacted history: removed \(compaction.messagesRemoved) messages (\(compaction.tokensBefore) -> \(compaction.tokensAfter) tokens) — session \(sessionId)"
                 )
+                // The measured base no longer matches the shrunk history;
+                // adopt the post-compaction size as the new base.
+                actualBaseTokens = compaction.tokensAfter
+                actualBaseCount = history.count
                 reportCompaction(
                     compaction,
                     sessionId: sessionId,
@@ -192,6 +217,14 @@ public struct Agent: Sendable {
             } catch {
                 onChunk("⚠️ Error during agent turn: \(error.localizedDescription)")
                 break
+            }
+
+            // The server just measured the prompt it received: adopt its
+            // report as the base for the next compaction check. At this
+            // point history is exactly what was sent.
+            if let usage = response.usage {
+                actualBaseTokens = usage.totalContextTokens
+                actualBaseCount = history.count
             }
 
             // Check if model emitted tool calls
@@ -248,14 +281,18 @@ public struct Agent: Sendable {
                         sendJSON: onSendJSON
                     )
                     
-                    history.append(
-                        ChatMessage(
-                            role: "tool",
-                            content: result,
-                            toolCallId: call.id,
-                            name: call.function.name
-                        )
+                    var toolMessage = ChatMessage(
+                        role: "tool",
+                        content: result.text,
+                        toolCallId: call.id,
+                        name: call.function.name
                     )
+                    // Image attachments (e.g. an image read by read_file) are
+                    // attached to the tool message so a vision model can see them.
+                    if let image = result.image {
+                        toolMessage.images = [image]
+                    }
+                    history.append(toolMessage)
                 }
                 
                 onSendJSON([
@@ -295,6 +332,15 @@ public struct Agent: Sendable {
 
         // Save updated history
         await sessionStore.saveHistory(history, for: sessionId)
+
+        // Persist the occupancy so the next turn's first compaction check
+        // starts from real numbers.
+        if let base = actualBaseTokens {
+            await sessionStore.setLastUsageTokens(
+                Self.knownTokens(base: base, baseCount: actualBaseCount, history: history),
+                for: sessionId
+            )
+        }
     }
 
     // MARK: - Compaction Reporting
@@ -365,6 +411,17 @@ public struct Agent: Sendable {
         return String(format: "%.1fk", Double(tokens) / 1000)
     }
 
+    /// Best-known token count for `history`: the server-measured base plus
+    /// a character-based estimate of everything appended after it. Callers
+    /// with no server measurement yet pass nil instead, falling back to
+    /// estimating the whole history.
+    private static func knownTokens(base: Int, baseCount: Int, history: [ChatMessage]) -> Int {
+        let delta = history.count > baseCount
+            ? ContextManager.estimateTokenCount(Array(history[baseCount...]))
+            : 0
+        return base + delta
+    }
+
     // MARK: - Manual Compaction
 
     /// Returns true when the prompt is the /compact command, which manually
@@ -395,7 +452,8 @@ public struct Agent: Sendable {
         let compaction = ContextManager.compactHistory(
             history,
             maxTokens: contextWindow,
-            force: true
+            force: true,
+            knownTokens: await sessionStore.lastUsageTokens(for: sessionId)
         )
         logger.debug(
             "/compact: \(compaction.tokensBefore) estimated tokens, compacted=\(compaction.compacted), removed=\(compaction.messagesRemoved) — session \(sessionId)"
@@ -416,6 +474,11 @@ public struct Agent: Sendable {
         }
 
         await sessionStore.saveHistory(compaction.messages, for: sessionId)
+
+        // The history shrank; record the post-compaction occupancy so the
+        // next turn does not start from the pre-compaction number.
+        await sessionStore.setLastUsageTokens(compaction.tokensAfter, for: sessionId)
+
         reportCompaction(
             compaction,
             sessionId: sessionId,
@@ -518,6 +581,22 @@ public struct Agent: Sendable {
 
             """
 
+        // read_file can return images only when the model can see them, so
+        // the native-tools line tracks the server's vision flag.
+        let nativeToolsBlock = supportsVision == false ? """
+            - You have seven primary native ACP tools available: read_file (for reading text files from disk), write_file (writing a file to disk), edit_file (editing part of a file), grep_file (searching workspace files), list_directory (listing directory contents), move_file (moving or renaming a file), and delete_file (deleting a file).
+            """ : """
+            - You have seven primary native ACP tools available: read_file (for reading from disk—text files come back as text, and image files such as PNG, JPEG, GIF, WebP, TIFF, BMP, or HEIC come back as images you can see), write_file (writing a file to disk), edit_file (editing part of a file), grep_file (searching workspace files), list_directory (listing directory contents), move_file (moving or renaming a file), and delete_file (deleting a file).
+            """
+
+        // Tell the model up front when it cannot see images, so it does not
+        // attempt image reads that will be refused.
+        let visionStatusBlock = supportsVision == false ? """
+            ### VISION STATUS
+            The current model does not support vision. read_file cannot read image files (PNG, JPEG, GIF, WebP, TIFF, BMP, HEIC) and will refuse them; rely on text files and other tools for anything that would otherwise need to see an image.
+
+            """ : ""
+
         // Skills use progressive disclosure: only the catalog (name +
         // description) goes into the prompt; the model loads the full
         // instructions on demand via the use_skill tool.
@@ -532,7 +611,9 @@ public struct Agent: Sendable {
             .replacingOccurrences(of: "{{CWD}}", with: cwd)
             .replacingOccurrences(of: "{{PLATFORM_INSTRUCTIONS}}", with: platformInstructions)
             .replacingOccurrences(of: "{{TERMINAL_TOOLS}}", with: terminalToolsBlock)
+            .replacingOccurrences(of: "{{NATIVE_TOOLS}}", with: nativeToolsBlock)
             .replacingOccurrences(of: "{{NETWORK_STATUS}}", with: networkStatusBlock)
+            .replacingOccurrences(of: "{{VISION_STATUS}}", with: visionStatusBlock)
             .replacingOccurrences(of: "{{SKILLS}}", with: skillsBlock)
             .replacingOccurrences(of: "{{CUSTOM_INSTRUCTIONS}}", with: customInstructionsBlock)
     }

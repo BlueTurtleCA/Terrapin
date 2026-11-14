@@ -88,11 +88,24 @@ public struct OpenAICompatibleClient: LLMClient {
 
         var content = ""
         var reasoning = ""
+        var usage: LLMUsage?
         var toolCallFragments: [Int: AccumulatedToolCall] = [:]
 
         do {
             for try await line in bytes.lines {
-                guard let delta = Self.parseDelta(from: line) else { continue }
+                guard let chunk = Self.parseChunk(from: line) else { continue }
+
+                // Servers that support stream_options.include_usage send the
+                // token counts in the final chunk, after the last delta.
+                if let chunkUsage = chunk.usage {
+                    usage = LLMUsage(
+                        promptTokens: chunkUsage.promptTokens ?? 0,
+                        completionTokens: chunkUsage.completionTokens ?? 0,
+                        cachedTokens: chunkUsage.promptTokensDetails?.cachedTokens
+                    )
+                }
+
+                guard let delta = chunk.choices?.first?.delta else { continue }
 
                 if let text = delta.content, !text.isEmpty {
                     content += text
@@ -147,24 +160,22 @@ public struct OpenAICompatibleClient: LLMClient {
         return LLMResponse(
             content: content.isEmpty ? nil : content,
             reasoning: reasoning.isEmpty ? nil : reasoning,
-            toolCalls: toolCalls
+            toolCalls: toolCalls,
+            usage: usage
         )
     }
 
     // MARK: - SSE Parsing
 
-    /// Extracts the content delta from a single SSE line, if any.
-    private static func parseDelta(from line: String) -> StreamChunk.Choice.Delta? {
+    /// Decodes a single SSE line into its full chunk, if any. Usage lives
+    /// outside the delta, so the caller needs the whole chunk.
+    private static func parseChunk(from line: String) -> StreamChunk? {
         guard line.hasPrefix("data:") else { return nil }
         let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
         if payload == "[DONE]" { return nil }
 
-        guard
-            let data = payload.data(using: .utf8),
-            let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data)
-        else { return nil }
-
-        return chunk.choices.first?.delta
+        guard let data = payload.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(StreamChunk.self, from: data)
     }
 
     // MARK: - Request / Response Models
@@ -175,6 +186,9 @@ public struct OpenAICompatibleClient: LLMClient {
         let tools: [ToolDefinition]
         let toolChoice: String
         let stream: Bool
+        // Asks the server to include the token usage in the final stream
+        // chunk. Servers that don't support the field ignore it.
+        let streamOptions: StreamOptions
         // llama.cpp: pins the request to a server slot so its KV cache is
         // reused when the prompt extends the previous one. Omitted when nil.
         let slotId: Int?
@@ -190,13 +204,23 @@ public struct OpenAICompatibleClient: LLMClient {
             self.tools = tools
             self.toolChoice = "auto"
             self.stream = true
+            self.streamOptions = StreamOptions(includeUsage: true)
             self.slotId = slotId
         }
 
         enum CodingKeys: String, CodingKey {
             case model, messages, tools, stream
             case toolChoice = "tool_choice"
+            case streamOptions = "stream_options"
             case slotId = "slot_id"
+        }
+    }
+
+    private struct StreamOptions: Encodable {
+        let includeUsage: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case includeUsage = "include_usage"
         }
     }
 
@@ -233,7 +257,30 @@ public struct OpenAICompatibleClient: LLMClient {
                 case finishReason = "finish_reason"
             }
         }
-        let choices: [Choice]
+        // Optional: the final usage chunk (choices omitted or empty) must
+        // still decode, and servers vary on how strictly they follow the spec.
+        let choices: [Choice]?
+        let usage: Usage?
+
+        struct Usage: Decodable {
+            let promptTokens: Int?
+            let completionTokens: Int?
+            let promptTokensDetails: Details?
+
+            struct Details: Decodable {
+                let cachedTokens: Int?
+
+                enum CodingKeys: String, CodingKey {
+                    case cachedTokens = "cached_tokens"
+                }
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case promptTokens = "prompt_tokens"
+                case completionTokens = "completion_tokens"
+                case promptTokensDetails = "prompt_tokens_details"
+            }
+        }
     }
 
     /// Accumulates the incremental tool-call fragments a server sends across

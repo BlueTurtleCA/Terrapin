@@ -8,6 +8,25 @@
 import Foundation
 import Stores
 
+/// The outcome of a tool execution. Most tools produce text only; read_file
+/// can additionally return an image attachment (when it reads an image
+/// file), which the agent attaches to the tool-result message so a vision
+/// model can see it.
+public struct ToolResult: Sendable {
+    public let text: String
+    public let image: ImageAttachment?
+
+    public init(text: String, image: ImageAttachment? = nil) {
+        self.text = text
+        self.image = image
+    }
+
+    /// Wraps a plain text result.
+    public init(_ text: String) {
+        self.init(text: text)
+    }
+}
+
 /// A source of tools the agent can call (Xcode MCP bridge, web tools, ...).
 public protocol ToolProvider: Sendable {
     func definitions() async -> [ToolDefinition]
@@ -17,7 +36,7 @@ public protocol ToolProvider: Sendable {
         cwd: String,
         sessionId: String,
         sendJSON: @escaping @Sendable ([String: Any]) -> Void
-    ) async -> String
+    ) async -> ToolResult
 
     /// One-time setup for a working directory, run before the agent loop so
     /// workspace-dependent tools are ready (e.g. opening the Xcode workspace
@@ -76,7 +95,7 @@ public struct ToolRegistry: Sendable {
         cwd: String,
         sessionId: String,
         sendJSON: @escaping @Sendable ([String: Any]) -> Void
-    ) async -> String {
+    ) async -> ToolResult {
         for provider in providers.all() {
             let providerTools = await provider.definitions()
             guard providerTools.contains(where: { $0.function.name == name }) else {
@@ -90,7 +109,7 @@ public struct ToolRegistry: Sendable {
                 sendJSON: sendJSON
             )
         }
-        return "Error: Unknown tool '\(name)'"
+        return ToolResult("Error: Unknown tool '\(name)'")
     }
 
     public func prepare(cwd: String) async {

@@ -71,6 +71,9 @@ struct OpenAICompatibleClientTests {
         #expect(body["tool_choice"] as? String == "auto")
         #expect(body["slot_id"] as? Int == 3)
 
+        let streamOptions = body["stream_options"] as? [String: Any]
+        #expect(streamOptions?["include_usage"] as? Bool == true)
+
         let messages = body["messages"] as? [[String: Any]]
         #expect(messages?.count == 1)
         #expect(messages?.first?["role"] as? String == "user")
@@ -247,6 +250,77 @@ struct OpenAICompatibleClientTests {
         #expect(response.content == "ok")
     }
 
+    // MARK: - Usage
+
+    @Test("usage in the final chunk is returned on the response")
+    func usageFromFinalChunk() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.serveSSE(
+            sse([
+                #"{"choices":[{"delta":{"content":"ok"}}]}"#,
+                #"{"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":8,"total_tokens":128,"prompt_tokens_details":{"cached_tokens":64}}}"#,
+            ]),
+            url: endpoint
+        )
+
+        let response = try await makeClient().complete(
+            messages: [userMessage],
+            tools: [],
+            slotId: nil,
+            onContent: { _ in },
+            onThought: { _ in }
+        )
+
+        #expect(response.content == "ok")
+        #expect(response.usage?.promptTokens == 120)
+        #expect(response.usage?.completionTokens == 8)
+        #expect(response.usage?.cachedTokens == 64)
+        #expect(response.usage?.totalContextTokens == 128)
+    }
+
+    @Test("a usage chunk without choices still decodes")
+    func usageChunkWithoutChoices() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.serveSSE(
+            sse([
+                #"{"choices":[{"delta":{"content":"ok"}}]}"#,
+                #"{"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+            ]),
+            url: endpoint
+        )
+
+        let response = try await makeClient().complete(
+            messages: [userMessage],
+            tools: [],
+            slotId: nil,
+            onContent: { _ in },
+            onThought: { _ in }
+        )
+
+        #expect(response.content == "ok")
+        #expect(response.usage?.totalContextTokens == 12)
+        #expect(response.usage?.cachedTokens == nil)
+    }
+
+    @Test("streams without a usage chunk leave usage nil")
+    func noUsageChunkLeavesNil() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.serveSSE(
+            sse([#"{"choices":[{"delta":{"content":"ok"}}]}"#]),
+            url: endpoint
+        )
+
+        let response = try await makeClient().complete(
+            messages: [userMessage],
+            tools: [],
+            slotId: nil,
+            onContent: { _ in },
+            onThought: { _ in }
+        )
+
+        #expect(response.usage == nil)
+    }
+
     @Test("non-data lines and malformed JSON are ignored")
     func ignoredLines() async throws {
         StubURLProtocol.reset()
@@ -408,5 +482,65 @@ struct OpenAICompatibleClientTests {
         } catch {
             Issue.record("expected LLMError.streamInterrupted, got \(error)")
         }
+    }
+
+    // MARK: - Multimodal Messages
+
+    @Test("a message with image attachments sends content parts")
+    func imageContentParts() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.serveSSE(sse([#"{"choices":[{"delta":{"content":"ok"}}]}"#]), url: endpoint)
+
+        let toolMessage = ChatMessage(
+            role: "tool",
+            content: "Image of '/tmp/shot.png' (PNG, 1568x1045, 340 KB). The image is attached to this result.",
+            toolCallId: "call_1",
+            name: "read_file",
+            images: [ImageAttachment(mimeType: "image/png", base64: "aW1hZ2VkYXRh", source: "/tmp/shot.png")]
+        )
+
+        _ = try await makeClient().complete(
+            messages: [userMessage, toolMessage],
+            tools: [],
+            slotId: nil,
+            onContent: { _ in },
+            onThought: { _ in }
+        )
+
+        let body = try decodedBody(0)
+        let messages = body["messages"] as? [[String: Any]]
+
+        // The plain message keeps its string content…
+        #expect(messages?.first?["content"] as? String == "hi")
+
+        // …while the image message becomes an array of content parts:
+        // text first, then one image_url part per attachment.
+        let content = messages?[1]["content"] as? [[String: Any]]
+        #expect(content?.count == 2)
+        #expect(content?.first?["type"] as? String == "text")
+        #expect(content?.first?["text"] as? String == toolMessage.content)
+        let imagePart = content?.last
+        #expect(imagePart?["type"] as? String == "image_url")
+        let imageURL = imagePart?["image_url"] as? [String: Any]
+        #expect(imageURL?["url"] as? String == "data:image/png;base64,aW1hZ2VkYXRh")
+    }
+
+    @Test("a message decoded from content parts keeps its text")
+    func decodesContentParts() throws {
+        // Hand-edited or foreign session files may store the parts array;
+        // decoding must keep the text and drop the image parts.
+        let json = """
+        {"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"hello"},{"type":"image_url","image_url":{"url":"data:image/png;base64,QQ=="}}]}
+        """
+        let message = try JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
+        #expect(message.content == "hello")
+        #expect(message.images == nil)
+        #expect(message.toolCallId == "call_1")
+
+        // Re-encoding it keeps the compact string form.
+        let object = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(message)
+        ) as? [String: Any]
+        #expect(object?["content"] as? String == "hello")
     }
 }

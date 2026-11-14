@@ -57,10 +57,10 @@ public struct WebTools: ToolProvider {
 
     public func definitions() async -> [ToolDefinition] { Self.definitions }
 
-    public func execute(name: String, argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> String {
+    public func execute(name: String, argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> ToolResult {
         guard let data = argsJSON.data(using: .utf8),
               let args = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            return "Error: Invalid JSON parameters supplied to \(name)"
+            return ToolResult("Error: Invalid JSON parameters supplied to \(name)")
         }
         
         let callId = UUID().uuidString
@@ -104,7 +104,7 @@ public struct WebTools: ToolProvider {
             ]
         ])
         
-        return response
+        return ToolResult(response)
     }
 
     // MARK: - Execution Dispatcher
