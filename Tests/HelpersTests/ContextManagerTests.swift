@@ -83,6 +83,31 @@ struct EstimateTokenCountTests {
         let b = ChatMessage(role: "assistant", content: String(repeating: "b", count: 70))
         #expect(ContextManager.estimateTokenCount([a, b]) == 30)
     }
+
+    @Test func attachedImagesAreCountedAtTheFixedEstimate() {
+        let textOnly = ChatMessage(role: "tool", content: "ok")
+        let withOneImage = ChatMessage(
+            role: "tool",
+            content: "ok",
+            images: [ImageAttachment(mimeType: "image/png", base64: "QQ==")]
+        )
+        let withTwoImages = ChatMessage(
+            role: "tool",
+            content: "ok",
+            images: [
+                ImageAttachment(mimeType: "image/png", base64: "QQ=="),
+                ImageAttachment(mimeType: "image/jpeg", base64: "QQ=="),
+            ]
+        )
+        #expect(
+            ContextManager.estimateTokenCount([withOneImage])
+                - ContextManager.estimateTokenCount([textOnly]) == ContextManager.imageTokenEstimate
+        )
+        #expect(
+            ContextManager.estimateTokenCount([withTwoImages])
+                - ContextManager.estimateTokenCount([textOnly]) == 2 * ContextManager.imageTokenEstimate
+        )
+    }
 }
 
 // MARK: - compactHistory
@@ -136,6 +161,30 @@ struct CompactHistoryTests {
         let result = ContextManager.compactHistory(history, maxTokens: 1000, force: true)
         #expect(!result.compacted)
         expectSameMessages(result.messages, history)
+    }
+
+    @Test func knownTokensBelowThresholdSkipsCompaction() {
+        let history = (0..<10).map { i in
+            message(i.isMultiple(of: 2) ? "user" : "assistant", chars: 350) // 100 each = 1000
+        }
+        // 1000 estimated tokens is over the 900 limit, but the server-measured
+        // count of 500 is not, so nothing is compacted.
+        let result = ContextManager.compactHistory(history, maxTokens: 1000, knownTokens: 500)
+        #expect(!result.compacted)
+        #expect(result.tokensBefore == 500)
+        #expect(result.tokensAfter == 500)
+        expectSameMessages(result.messages, history)
+    }
+
+    @Test func knownTokensAboveThresholdTriggersCompaction() {
+        let history = (0..<8).map { i in
+            message(i.isMultiple(of: 2) ? "user" : "assistant", chars: 350) // 100 each = 800
+        }
+        // 800 estimated tokens is under the 900 limit, but the server-measured
+        // count of 950 is over it, so compaction fires.
+        let result = ContextManager.compactHistory(history, maxTokens: 1000, knownTokens: 950)
+        #expect(result.compacted)
+        #expect(result.tokensBefore == 950)
     }
 
     @Test func compactionKeepsSystemMessageAndNoticePair() {
@@ -459,5 +508,122 @@ struct ResolveContextWindowTests {
             fetch: fetchStub(apiV1: response, v1: nil)
         )
         #expect(result == 16384)
+    }
+}
+
+// MARK: - resolveModelInfo
+
+@Suite("resolveModelInfo")
+struct ResolveModelInfoTests {
+    private let endpoint = "http://localhost:8080"
+
+    private func modelsResponse(_ models: [[String: Any]]) -> Data {
+        let object: [String: Any] = ["data": models]
+        return try! JSONSerialization.data(withJSONObject: object)
+    }
+
+    /// Stub fetcher: `apiV1` answers `/api/v1/models`, `v1` answers `/v1/models`;
+    /// a `nil` payload makes that request fail.
+    private func fetchStub(
+        apiV1: Data?,
+        v1: Data?
+    ) -> @Sendable (URL) async throws -> Data {
+        { url in
+            if url.absoluteString.hasSuffix("/api/v1/models") {
+                guard let apiV1 else { throw URLError(.cannotConnectToHost) }
+                return apiV1
+            }
+            if url.absoluteString.hasSuffix("/v1/models") {
+                guard let v1 else { throw URLError(.cannotConnectToHost) }
+                return v1
+            }
+            throw URLError(.badURL)
+        }
+    }
+
+    @Test func splashVisionFalseIsReported() async {
+        let response = modelsResponse([
+            [
+                "id": "local/qwen",
+                "context_length": 139257,
+                "vision": false,
+                "input_modalities": ["text"],
+            ],
+        ])
+        let info = await ContextManager.resolveModelInfo(
+            endpoint,
+            fetch: fetchStub(apiV1: response, v1: nil)
+        )
+        #expect(info.contextWindow == 139257)
+        #expect(info.supportsVision == false)
+    }
+
+    @Test func splashVisionTrueIsReported() async {
+        let response = modelsResponse([
+            [
+                "id": "local/qwen-vl",
+                "context_length": 8192,
+                "vision": true,
+                "input_modalities": ["text", "image"],
+            ],
+        ])
+        let info = await ContextManager.resolveModelInfo(
+            endpoint,
+            fetch: fetchStub(apiV1: nil, v1: response)
+        )
+        #expect(info.contextWindow == 8192)
+        #expect(info.supportsVision == true)
+    }
+
+    @Test func inputModalitiesAloneDecideVision() async {
+        let withImage = modelsResponse([
+            ["id": "model", "input_modalities": ["text", "image"]],
+        ])
+        let textOnly = modelsResponse([
+            ["id": "model", "input_modalities": ["text"]],
+        ])
+        let vision = await ContextManager.resolveModelInfo(
+            endpoint,
+            fetch: fetchStub(apiV1: withImage, v1: nil)
+        )
+        let noVision = await ContextManager.resolveModelInfo(
+            endpoint,
+            fetch: fetchStub(apiV1: textOnly, v1: nil)
+        )
+        #expect(vision.supportsVision == true)
+        #expect(noVision.supportsVision == false)
+    }
+
+    @Test func visionFlagTakesPrecedenceOverModalities() async {
+        let response = modelsResponse([
+            ["id": "model", "vision": false, "input_modalities": ["text", "image"]],
+        ])
+        let info = await ContextManager.resolveModelInfo(
+            endpoint,
+            fetch: fetchStub(apiV1: response, v1: nil)
+        )
+        #expect(info.supportsVision == false)
+    }
+
+    @Test func serversWithoutVisionInfoReportNil() async {
+        // llama.cpp-style entry: no vision field at all.
+        let response = modelsResponse([
+            ["id": "model", "state": "loaded", "meta": ["n_ctx": 32768]],
+        ])
+        let info = await ContextManager.resolveModelInfo(
+            endpoint,
+            fetch: fetchStub(apiV1: response, v1: nil)
+        )
+        #expect(info.contextWindow == 32768)
+        #expect(info.supportsVision == nil)
+    }
+
+    @Test func unreachableServerYieldsNilInfo() async {
+        let info = await ContextManager.resolveModelInfo(
+            endpoint,
+            fetch: fetchStub(apiV1: nil, v1: nil)
+        )
+        #expect(info.contextWindow == nil)
+        #expect(info.supportsVision == nil)
     }
 }

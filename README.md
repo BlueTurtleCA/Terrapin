@@ -115,6 +115,7 @@ On `initialize`, Terrapin reads the client's `clientInfo` (name/title) to identi
 ## Tools
 
 - **Xcode MCP tools** — discovered at runtime from `xcrun mcpbridge` (read, edit, build, test, debug, previews, and more). Terrapin auto-injects the `workspaceIdentifier` and `tabIdentifier` so the model does not have to supply them.
+- **Native ACP file tools** — `read_file`, `write_file`, `edit_file`, `grep_file`, `list_directory`, `move_file`, `delete_file`. `read_file` reads text files as text, and image files (PNG, JPEG, GIF, WebP, TIFF, BMP, HEIC) as images: it sniffs the format from the file's leading bytes, downsamples the longest edge to ~1568px, re-encodes it under a 1MB budget, and sends it to the model as an `image_url` content part (data URL). Image payloads live only in the in-memory conversation — persisted history keeps a note in their place instead of the base64.
 - **`web_fetch`** — fetches an HTTP/HTTPS URL and returns its text content.
 - **`web_search`** — searches the live web (Tavily or DuckDuckGo).
 - **`use_skill`** — loads the full instructions of a skill from the `AVAILABLE SKILLS` catalog in the system prompt.
@@ -235,4 +236,4 @@ Terrapin/
 
 ## License
 
-GPL v3 — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

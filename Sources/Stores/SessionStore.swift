@@ -18,6 +18,10 @@ public actor SessionStore {
     // The context window the agent believes the model has, recorded per
     // session so the persisted file shows what compaction was tuned to.
     private var contextWindows: [String: Int] = [:]
+    // Last known context occupancy of the saved history, in tokens: measured
+    // by the server when it reports usage, estimated after compaction. Lets
+    // a new turn decide compaction from real numbers on its first check.
+    private var lastUsageTokens: [String: Int] = [:]
     private let sessionsDirectory: URL
     private let logger: Loggable
     
@@ -100,6 +104,17 @@ public actor SessionStore {
         persist(sessionId)
     }
     
+    // Last known context occupancy of the saved history (nil when the server
+    // has not reported usage and no compaction has happened yet).
+    public func lastUsageTokens(for sessionId: String) -> Int? {
+        return lastUsageTokens[sessionId]
+    }
+    
+    public func setLastUsageTokens(_ tokens: Int, for sessionId: String) {
+        lastUsageTokens[sessionId] = tokens
+        persist(sessionId)
+    }
+    
     // Get chat history or fallback to standard system prompt
     public func getHistory(for sessionId: String, defaultSystemPrompt: String) -> [ChatMessage] {
         return histories[sessionId] ?? [
@@ -107,9 +122,12 @@ public actor SessionStore {
         ]
     }
     
-    // Save updated conversation history
+    // Save updated conversation history. Image attachments are stripped on
+    // the way in: they are only useful to the model for the turn that
+    // produced them, and persisting megabytes of base64 would bloat the
+    // session file and re-send the image on every later turn.
     public func saveHistory(_ history: [ChatMessage], for sessionId: String) {
-        histories[sessionId] = history
+        histories[sessionId] = history.map { $0.strippingImages() }
         persist(sessionId)
     }
 
@@ -135,6 +153,9 @@ public actor SessionStore {
         }
         if let window = record.contextWindow {
             contextWindows[sessionId] = window
+        }
+        if let tokens = record.lastUsageTokens {
+            lastUsageTokens[sessionId] = tokens
         }
         histories[sessionId] = record.history
         return true
@@ -177,6 +198,7 @@ public actor SessionStore {
         histories[sessionId] = nil
         networkStates[sessionId] = nil
         contextWindows[sessionId] = nil
+        lastUsageTokens[sessionId] = nil
         do {
             try FileManager.default.removeItem(at: fileURL(for: sessionId))
         } catch let error as NSError where
@@ -197,6 +219,7 @@ public actor SessionStore {
         var history: [ChatMessage]
         var networkState: Bool?
         var contextWindow: Int?
+        var lastUsageTokens: Int?
     }
 
     /// File for a session. Session IDs are normally UUIDs, but clients may
@@ -216,7 +239,8 @@ public actor SessionStore {
             cwd: workingDirs[sessionId],
             history: histories[sessionId] ?? [],
             networkState: networkStates[sessionId],
-            contextWindow: contextWindows[sessionId]
+            contextWindow: contextWindows[sessionId],
+            lastUsageTokens: lastUsageTokens[sessionId]
         )
         do {
             try FileManager.default.createDirectory(

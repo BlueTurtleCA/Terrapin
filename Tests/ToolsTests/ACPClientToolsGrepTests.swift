@@ -38,13 +38,13 @@ struct ACPClientToolsGrepTests {
     }
 
     private func grep(_ tools: ACPClientTools, _ cwd: String, _ args: String) async -> String {
-        await tools.execute(
+        (await tools.execute(
             name: "grep_file",
             argsJSON: args,
             cwd: cwd,
             sessionId: "test",
             sendJSON: { _ in }
-        )
+        )).text
     }
 
     @Test func wholeTreeRegexCaseInsensitive() async {
@@ -124,13 +124,13 @@ struct ACPClientToolsGrepTests {
 
     @Test func listDirectoryShowsNamesAndSizes() async {
         let (tools, cwd, temp) = makeWorkspace()
-        let result = await tools.execute(
+        let result = (await tools.execute(
             name: "list_directory",
             argsJSON: "{}",
             cwd: cwd,
             sessionId: "test",
             sendJSON: { _ in }
-        )
+        )).text
         #expect(result.contains("Sources/ (directory)"))
         #expect(result.contains("notes.txt ("))
         #expect(result.contains(" bytes)"))
@@ -140,61 +140,61 @@ struct ACPClientToolsGrepTests {
 
     @Test func listDirectoryMissingPathIsError() async {
         let (tools, cwd, temp) = makeWorkspace()
-        let result = await tools.execute(
+        let result = (await tools.execute(
             name: "list_directory",
             argsJSON: #"{"path": "does-not-exist"}"#,
             cwd: cwd,
             sessionId: "test",
             sendJSON: { _ in }
-        )
+        )).text
         #expect(result.hasPrefix("Error listing directory"))
     }
 
     @Test func listEmptyDirectory() async {
         let (tools, cwd, temp) = makeWorkspace()
         try? FileManager.default.createDirectory(atPath: cwd + "/empty", withIntermediateDirectories: true)
-        let result = await tools.execute(
+        let result = (await tools.execute(
             name: "list_directory",
             argsJSON: #"{"path": "empty"}"#,
             cwd: cwd,
             sessionId: "test",
             sendJSON: { _ in }
-        )
+        )).text
         #expect(result == "(empty directory)")
     }
 
     @Test func readFileStripsCRLFLineEndings() async {
         let (tools, cwd, temp) = makeWorkspace()
         temp.write("crlf.txt", "first line\r\nsecond line\r\nthird line\r\n")
-        let result = await tools.execute(
+        let result = (await tools.execute(
             name: "read_file",
             argsJSON: #"{"path": "crlf.txt", "line": 2, "limit": 2}"#,
             cwd: cwd,
             sessionId: "test",
             sendJSON: { _ in }
-        )
+        )).text
         #expect(result == "second line\nthird line")
     }
 
     @Test func readFileResolvesWorkspaceNamePrefixAndAbsolutePaths() async {
         let (tools, cwd, temp) = makeWorkspace()
         let rootName = (cwd as NSString).lastPathComponent
-        let prefixed = await tools.execute(
+        let prefixed = (await tools.execute(
             name: "read_file",
             argsJSON: #"{"path": "\#(rootName)/notes.txt"}"#,
             cwd: cwd,
             sessionId: "test",
             sendJSON: { _ in }
-        )
+        )).text
         #expect(prefixed == "canimport in notes\n")
         
-        let absolute = await tools.execute(
+        let absolute = (await tools.execute(
             name: "read_file",
             argsJSON: #"{"path": "\#(cwd)/notes.txt"}"#,
             cwd: cwd,
             sessionId: "test",
             sendJSON: { _ in }
-        )
+        )).text
         #expect(absolute == "canimport in notes\n")
     }
 
@@ -202,13 +202,13 @@ struct ACPClientToolsGrepTests {
         let (tools, cwd, temp) = makeWorkspace()
         let outside = temp.url.deletingLastPathComponent()
             .appendingPathComponent("outside-\(UUID().uuidString).txt")
-        let result = await tools.execute(
+        let result = (await tools.execute(
             name: "move_file",
             argsJSON: #"{"path": "notes.txt", "newPath": "\#(outside.path)"}"#,
             cwd: cwd,
             sessionId: "test",
             sendJSON: { _ in }
-        )
+        )).text
         #expect(result.contains("path is outside the workspace"))
         #expect(!FileManager.default.fileExists(atPath: outside.path))
         #expect(FileManager.default.fileExists(atPath: cwd + "/notes.txt"))

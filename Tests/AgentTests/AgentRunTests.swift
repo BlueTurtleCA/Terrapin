@@ -79,6 +79,25 @@ struct AgentRunTests {
         #expect(await harness.store.contextWindow(for: harness.sessionId) == 4096)
     }
 
+    @Test("server-reported usage is persisted on the session")
+    func usagePersisted() async {
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [
+                .response(
+                    LLMResponse(
+                        content: "Done.",
+                        usage: LLMUsage(promptTokens: 120, completionTokens: 8)
+                    )
+                )
+            ])
+        )
+        let recorder = Recorder()
+        await harness.run(prompt: "hi", recorder: recorder)
+
+        // 120 + 8, plus the estimated final assistant message ("Done." = 1).
+        #expect(await harness.store.lastUsageTokens(for: harness.sessionId) == 129)
+    }
+
     // MARK: - Tool Calls
 
     @Test("tool calls are executed and fed back to the model")
@@ -124,6 +143,42 @@ struct AgentRunTests {
         let history = await harness.store.history(for: harness.sessionId) ?? []
         #expect(history.last?.content == "Done.")
         #expect(recorder.chunks.joined() == "Done.")
+    }
+
+    @Test("a tool result with an image attaches it to the tool message")
+    func toolCallWithImageAttachment() async {
+        let tool = testToolDefinition("read_file")
+        let toolCall = ToolCall(
+            id: "call_1",
+            function: FunctionCall(name: "read_file", arguments: #"{"path":"shot.png"}"#)
+        )
+        let attachment = ImageAttachment(mimeType: "image/png", base64: "aW1hZ2U=", source: "shot.png")
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [
+                .response(LLMResponse(content: nil, toolCalls: [toolCall])),
+                .response(LLMResponse(content: "Got it.")),
+            ]),
+            tools: [tool],
+            results: ["read_file": "Image of 'shot.png' (PNG, 100x100, 1 KB). The image is attached to this result."],
+            images: ["read_file": attachment]
+        )
+        let recorder = Recorder()
+        await harness.run(prompt: "Look at the image", tools: [tool], recorder: recorder)
+
+        // The model's second call sees the tool message with its image.
+        #expect(harness.llm.callCount == 2)
+        let toolMessage = harness.llm.calls[1].messages[3]
+        #expect(toolMessage.role == "tool")
+        #expect(toolMessage.content?.hasPrefix("Image of 'shot.png'") == true)
+        #expect(toolMessage.images?.count == 1)
+        #expect(toolMessage.images?.first?.base64 == "aW1hZ2U=")
+        #expect(toolMessage.images?.first?.mimeType == "image/png")
+
+        // The persisted history keeps the text but not the image payload.
+        let history = await harness.store.history(for: harness.sessionId) ?? []
+        let persisted = history.filter { $0.role == "tool" }.first
+        #expect(persisted?.images == nil)
+        #expect(persisted?.content?.contains("not persisted to history") == true)
     }
 
     @Test("multiple tool calls in one response run in order")

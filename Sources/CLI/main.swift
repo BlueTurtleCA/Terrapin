@@ -34,7 +34,19 @@ let mcpClient = XcodeMCPBridgeClient(logger, debugLog: config.debugLog)
 //    native ACP client tools). The Xcode MCP bridge is added to the registry
 //    by the ACP server after client detection.
 let clientChannel = ClientChannel()
-let clientTools = ACPClientTools(clientChannel: clientChannel, xcodeBridge: mcpClient)
+
+// Ask the server what it says about the loaded model: the context window and,
+// when the server states it, whether the model can see images. The vision
+// flag gates image reads so the model is not told it can view files it
+// cannot.
+let modelInfo = await ContextManager.resolveModelInfo(
+    config.serverURL.absoluteString
+)
+let clientTools = ACPClientTools(
+    clientChannel: clientChannel,
+    xcodeBridge: mcpClient,
+    supportsVision: modelInfo.supportsVision
+)
 
 // Skill discovery: project + user + extra + bundled skills. The same
 // closure feeds the prompt catalog and the use_skill tool so the two
@@ -53,11 +65,17 @@ let contextWindow: Int
 if let override = config.contextWindowOverride {
     contextWindow = override
 } else {
-    contextWindow = await ContextManager.resolveContextWindow(
-        config.serverURL.absoluteString
-    )
+    contextWindow = modelInfo.contextWindow ?? 16384
 }
 logger.debug("Using context window of: \(contextWindow)")
+switch modelInfo.supportsVision {
+case true:
+    logger.debug("Model supports vision: image reads enabled")
+case false:
+    logger.debug("Model does not support vision: image reads disabled")
+case nil:
+    logger.debug("Server did not report vision support: image reads enabled (unknown)")
+}
 if config.debugLog {
     logger.debug("Debug logging enabled: LLM request bodies + Xcode MCP bridge calls -> ~/.terrapin/logs/")
 }
@@ -76,7 +94,8 @@ let agent = Agent(
     platformInstructions: loadPlatformInstructions(),
     skillCatalog: skillCatalog,
     logger: logger,
-    slotCount: config.slots
+    slotCount: config.slots,
+    supportsVision: modelInfo.supportsVision
 )
 
 // 5. Serve ACP over stdin/stdout

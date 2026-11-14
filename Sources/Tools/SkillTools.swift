@@ -46,14 +46,14 @@ public struct SkillTools: ToolProvider {
 
     public func definitions() async -> [ToolDefinition] { Self.definitions }
 
-    public func execute(name: String, argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> String {
+    public func execute(name: String, argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> ToolResult {
         guard let data = argsJSON.data(using: .utf8),
               let args = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else {
-            return "Error: Invalid JSON parameters supplied to \(name)"
+            return ToolResult("Error: Invalid JSON parameters supplied to \(name)")
         }
         guard let skillName = args["name"] as? String, !skillName.isEmpty else {
-            return "Error: Missing 'name' parameter"
+            return ToolResult("Error: Missing 'name' parameter")
         }
 
         let callId = UUID().uuidString
@@ -86,7 +86,7 @@ public struct SkillTools: ToolProvider {
             ]
         ])
 
-        return result
+        return ToolResult(result)
     }
 
     // MARK: - Skill Loading

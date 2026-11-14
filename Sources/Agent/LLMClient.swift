@@ -8,17 +8,50 @@
 import Foundation
 import Stores
 
+/// Token usage the server reports for one completion (the `usage` object of
+/// the OpenAI-compatible API, sent in the final stream chunk when
+/// `stream_options.include_usage` is set). `promptTokens` is the full prompt
+/// size as tokenized by the server, cached tokens included, so
+/// `promptTokens + completionTokens` is the true context occupancy right
+/// after the call — a better compaction signal than character estimates.
+public struct LLMUsage: Sendable {
+    public let promptTokens: Int
+    public let completionTokens: Int
+    /// Prompt tokens the server served from its KV cache (llama.cpp's
+    /// `prompt_tokens_details.cached_tokens`); nil when the server omits it.
+    public let cachedTokens: Int?
+
+    /// Total context occupancy after this call.
+    public var totalContextTokens: Int {
+        promptTokens + completionTokens
+    }
+
+    public init(promptTokens: Int, completionTokens: Int, cachedTokens: Int? = nil) {
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.cachedTokens = cachedTokens
+    }
+}
+
 /// A single completed turn from the model: text content, reasoning, tool
 /// calls, or any combination.
 public struct LLMResponse: Sendable {
     public let content: String?
     public let reasoning: String?
     public let toolCalls: [ToolCall]
+    /// The server's token report for this call, when it sends one.
+    public let usage: LLMUsage?
 
-    public init(content: String?, reasoning: String? = nil, toolCalls: [ToolCall] = []) {
+    public init(
+        content: String?,
+        reasoning: String? = nil,
+        toolCalls: [ToolCall] = [],
+        usage: LLMUsage? = nil
+    ) {
         self.content = content
         self.reasoning = reasoning
         self.toolCalls = toolCalls
+        self.usage = usage
     }
 }
 

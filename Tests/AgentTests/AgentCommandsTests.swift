@@ -166,6 +166,76 @@ struct CompactCommandTests {
         #expect(firstCall[1].role == "assistant")
         #expect(firstCall.last?.content == "new prompt")
     }
+
+    // MARK: - Usage-Driven Compaction
+
+    @Test("a low server-reported usage prevents estimated compaction")
+    func lowUsagePreventsCompaction() async {
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [
+                .response(
+                    LLMResponse(
+                        content: "Done.",
+                        usage: LLMUsage(promptTokens: 250, completionTokens: 10)
+                    )
+                )
+            ]),
+            contextWindow: 1000
+        )
+        // The estimate says 1000 tokens (over the 900 limit), but the last
+        // server measurement said the history is only 200 tokens.
+        await harness.store.saveHistory(bigHistory(count: 10), for: harness.sessionId)
+        await harness.store.setLastUsageTokens(200, for: harness.sessionId)
+        let recorder = Recorder()
+        await harness.run(prompt: "new prompt", recorder: recorder)
+
+        #expect(recorder.updates("compaction_update").isEmpty)
+        #expect(harness.llm.callCount == 1)
+        // The full (uncompacted) history was sent.
+        #expect(harness.llm.calls[0].messages.last?.content == "new prompt")
+
+        // 250 + 10, plus the estimated final assistant message ("Done." = 1).
+        #expect(await harness.store.lastUsageTokens(for: harness.sessionId) == 261)
+    }
+
+    @Test("server-reported usage triggers compaction the estimate would miss")
+    func usageTriggersCompaction() async {
+        let toolA = testToolDefinition("tool_a")
+        let toolB = testToolDefinition("tool_b")
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [
+                .response(
+                    LLMResponse(
+                        content: nil,
+                        toolCalls: [
+                            ToolCall(id: "call_a", function: FunctionCall(name: "tool_a", arguments: "{}")),
+                            ToolCall(id: "call_b", function: FunctionCall(name: "tool_b", arguments: "{}")),
+                        ],
+                        usage: LLMUsage(promptTokens: 900, completionTokens: 30)
+                    )
+                ),
+                .response(LLMResponse(content: "done")),
+            ]),
+            tools: [toolA, toolB],
+            results: [
+                "tool_a": String(repeating: "a", count: 350),
+                "tool_b": String(repeating: "b", count: 350),
+            ],
+            contextWindow: 1000
+        )
+        let recorder = Recorder()
+        await harness.run(prompt: "go", supportsCompaction: true, tools: [toolA, toolB], recorder: recorder)
+
+        // The history estimates at a few hundred tokens (under the limit),
+        // but the server measured 930 after the first call, so the second
+        // check compacts.
+        #expect(harness.llm.callCount == 2)
+        #expect(recorder.updates("compaction_update").count == 1)
+
+        let secondCall = harness.llm.calls[1].messages
+        #expect(secondCall[1].role == "user")
+        #expect(secondCall[1].content?.contains("compacted") == true)
+    }
 }
 
 // MARK: - /debug

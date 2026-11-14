@@ -142,13 +142,19 @@ final class FakeToolProvider: ToolProvider, @unchecked Sendable {
     private let lock = NSLock()
     private let toolDefinitions: [ToolDefinition]
     private let results: [String: String]
+    private let images: [String: ImageAttachment]
     private var _executions: [FakeToolCall] = []
     private var _preparedCwds: [String] = []
     private var _onExecute: (@Sendable (FakeToolCall) -> Void)?
 
-    init(tools: [ToolDefinition] = [], results: [String: String] = [:]) {
+    init(
+        tools: [ToolDefinition] = [],
+        results: [String: String] = [:],
+        images: [String: ImageAttachment] = [:]
+    ) {
         self.toolDefinitions = tools
         self.results = results
+        self.images = images
     }
 
     var executions: [FakeToolCall] { lock.withLock { _executions } }
@@ -170,14 +176,15 @@ final class FakeToolProvider: ToolProvider, @unchecked Sendable {
         cwd: String,
         sessionId: String,
         sendJSON: @escaping @Sendable ([String: Any]) -> Void
-    ) async -> String {
+    ) async -> ToolResult {
         let call = FakeToolCall(name: name, argsJSON: argsJSON, cwd: cwd, sessionId: sessionId)
-        let (hook, result): ((@Sendable (FakeToolCall) -> Void)?, String) = lock.withLock {
-            _executions.append(call)
-            return (_onExecute, results[name] ?? "Result of \(name)")
-        }
+        let (hook, result, image): ((@Sendable (FakeToolCall) -> Void)?, String, ImageAttachment?) =
+            lock.withLock {
+                _executions.append(call)
+                return (_onExecute, results[name] ?? "Result of \(name)", images[name])
+            }
         hook?(call)
-        return result
+        return ToolResult(text: result, image: image)
     }
 
     func prepare(cwd: String) async {
@@ -436,18 +443,20 @@ func makeAgentHarness(
     llm: FakeLLMClient,
     tools: [ToolDefinition] = [],
     results: [String: String] = [:],
+    images: [String: ImageAttachment] = [:],
     contextWindow: Int = 10_000,
     templates: [ClientKind: String] = testTemplates,
     platformInstructions: String = "",
     skills: [Skill] = [],
-    slotCount: Int = 1
+    slotCount: Int = 1,
+    supportsVision: Bool? = nil
 ) -> AgentHarness {
     let temp = TempDirectory()
     let store = SessionStore(
         logger: NoOpLogger(),
         sessionsDirectory: temp.url.appendingPathComponent("sessions")
     )
-    let provider = FakeToolProvider(tools: tools, results: results)
+    let provider = FakeToolProvider(tools: tools, results: results, images: images)
     let agent = Agent(
         llmClient: llm,
         toolRegistry: ToolRegistry([provider]),
@@ -458,7 +467,8 @@ func makeAgentHarness(
         skillCatalog: { _ in SkillCatalog(skills: skills) },
         logger: NoOpLogger(),
         slotCount: slotCount,
-        networkMonitor: NetworkMonitor()
+        networkMonitor: NetworkMonitor(),
+        supportsVision: supportsVision
     )
     return AgentHarness(
         agent: agent,

@@ -11,6 +11,10 @@ import Stores
 public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     let clientChannel: ClientChannel
     let xcodeBridge: XcodeMCPBridgeClient?
+    /// The server's explicit statement about the model's vision support
+    /// (from /v1/models); nil when the server does not report it. When the
+    /// server says no, image reads are refused and never advertised.
+    let supportsVision: Bool?
     private let lock = NSLock()
     private var capabilities = Capabilities()
     // Terminals still alive per session (created but not yet released), so
@@ -21,9 +25,14 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
         case message(String)
     }
     
-    public init(clientChannel: ClientChannel, xcodeBridge: XcodeMCPBridgeClient? = nil) {
+    public init(
+        clientChannel: ClientChannel,
+        xcodeBridge: XcodeMCPBridgeClient? = nil,
+        supportsVision: Bool? = nil
+    ) {
         self.clientChannel = clientChannel
         self.xcodeBridge = xcodeBridge
+        self.supportsVision = supportsVision
     }
     
     private var currentCapabilities: Capabilities {
@@ -34,7 +43,7 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     
     public func definitions() async -> [ToolDefinition] {
         var tools: [ToolDefinition] = []
-        tools.append(Self.readTextFileDefinition)
+        tools.append(readTextFileDefinition)
         tools.append(Self.writeTextFileDefinition)
         tools.append(Self.editTextFileDefinition)
         tools.append(Self.grepTextFileDefinition)
@@ -47,40 +56,41 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
         return tools
     }
     
-    public func execute(name: String, argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> String {
+    public func execute(name: String, argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> ToolResult {
         guard !sessionId.isEmpty else {
-            return "Error: No active ACP session"
+            return ToolResult("Error: No active ACP session")
         }
 
         switch name {
         case "read_file":
+            // read_file can return an image attachment, not just text.
             return await readTextFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
         case "write_file":
-            return await writeTextFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await writeTextFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON))
         case "edit_file":
-            return await editTextFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await editTextFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON))
         case "grep_file":
-            return await grepTextFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await grepTextFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON))
         case "move_file":
-            return await moveFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await moveFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON))
         case "delete_file":
-            return await deleteFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await deleteFile(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON))
         case "list_directory":
-            return await listDirectory(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await listDirectory(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON))
         case "run_command":
-            return await runCommand(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await runCommand(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON))
         case "terminal_create":
-            return await createTerminalTool(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await createTerminalTool(argsJSON: argsJSON, cwd: cwd, sessionId: sessionId, sendJSON: sendJSON))
         case "terminal_output":
-            return await terminalOutput(argsJSON: argsJSON, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await terminalOutput(argsJSON: argsJSON, sessionId: sessionId, sendJSON: sendJSON))
         case "terminal_wait_for_exit":
-            return await terminalWaitForExit(argsJSON: argsJSON, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await terminalWaitForExit(argsJSON: argsJSON, sessionId: sessionId, sendJSON: sendJSON))
         case "terminal_kill":
-            return await terminalKill(argsJSON: argsJSON, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await terminalKill(argsJSON: argsJSON, sessionId: sessionId, sendJSON: sendJSON))
         case "terminal_release":
-            return await terminalRelease(argsJSON: argsJSON, sessionId: sessionId, sendJSON: sendJSON)
+            return ToolResult(await terminalRelease(argsJSON: argsJSON, sessionId: sessionId, sendJSON: sendJSON))
         default:
-            return "Error: Unknown tool '\(name)'"
+            return ToolResult("Error: Unknown tool '\(name)'")
         }
     }
     
@@ -121,30 +131,40 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
         return terminalIds.count
     }
     
-    private static let readTextFileDefinition = ToolDefinition(
-        function: FunctionDefinition(
-            name: "read_file",
-            description: "Reads a text file from the client's file system, including unsaved editor changes. For any project files, you MUST use this call.",
-            parameters: [
-                "type": AnySendable("object"),
-                "properties": AnySendable([
-                    "path": AnySendable([
-                        "type": AnySendable("string"),
-                        "description": AnySendable("Path of the file to read. Relative paths are resolved against the working directory.")
-                    ]),
-                    "line": AnySendable([
-                        "type": AnySendable("integer"),
-                        "description": AnySendable("Optional 1-based line number to start reading from.")
-                    ]),
-                    "limit": AnySendable([
-                        "type": AnySendable("integer"),
-                        "description": AnySendable("Optional maximum number of lines to read.")
-                    ])
-                ]),
-                "required": AnySendable([AnySendable("path")])
-            ]
+    // The description tracks the server's vision flag: when the server says
+    // the model cannot see, the image claim is dropped so the model does not
+    // attempt image reads it could never use.
+    private var readTextFileDefinition: ToolDefinition {
+        let description = supportsVision == false
+            ? "Reads a file from the client's file system, including unsaved editor changes. Text files are returned as text; the current model cannot view image files. For any project files, you MUST use this call."
+            : "Reads a file from the client's file system, including unsaved editor changes. Text files are returned as text; image files (PNG, JPEG, GIF, WebP, TIFF, BMP, HEIC) are returned as images you can see. For any project files, you MUST use this call."
+        return ToolDefinition(
+            function: FunctionDefinition(
+                name: "read_file",
+                description: description,
+                parameters: Self.readTextFileParameters
+            )
         )
-    )
+    }
+    
+    private static let readTextFileParameters: [String: AnySendable] = [
+        "type": AnySendable("object"),
+        "properties": AnySendable([
+            "path": AnySendable([
+                "type": AnySendable("string"),
+                "description": AnySendable("Path of the file to read. Relative paths are resolved against the working directory.")
+            ]),
+            "line": AnySendable([
+                "type": AnySendable("integer"),
+                "description": AnySendable("Optional 1-based line number to start reading from.")
+            ]),
+            "limit": AnySendable([
+                "type": AnySendable("integer"),
+                "description": AnySendable("Optional maximum number of lines to read.")
+            ])
+        ]),
+        "required": AnySendable([AnySendable("path")])
+    ]
     
     private static let writeTextFileDefinition = ToolDefinition(
         function: FunctionDefinition(
@@ -419,14 +439,14 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     
     // MARK: - Filesystem Tools
 
-    private func readTextFile(argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> String {
+    private func readTextFile(argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> ToolResult {
         let callId = "call_" + UUID().uuidString
         
         guard let args = Self.parseArgs(argsJSON) else {
-            return "Error: Invalid JSON parameters supplied to read_file"
+            return ToolResult("Error: Invalid JSON parameters supplied to read_file")
         }
         guard let rawPath = args["path"] as? String, !rawPath.isEmpty else {
-            return "Error: Missing 'path' parameter"
+            return ToolResult("Error: Missing 'path' parameter")
         }
         let path = Self.resolveWorkspacePath(relativePath: rawPath, workspaceRoot: cwd)
         let fileName = URL(fileURLWithPath: path).lastPathComponent
@@ -441,6 +461,48 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
             locations: [["path": path]],
             sendJSON: sendJSON
         )
+        
+        // Image files are read from the local disk (the ACP client and the
+        // Xcode bridge only handle text) and returned as an attachment so a
+        // vision model can see them. Other binaries are rejected up front
+        // instead of producing garbled text.
+        if let head = Self.peekHeadBytes(atPath: path), !head.isEmpty {
+            if ImageSupport.mimeType(of: head) != nil {
+                // The server said the model cannot see images: refuse up
+                // front so the model does not burn turns on reads it could
+                // never use.
+                if supportsVision == false {
+                    Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
+                    return ToolResult(
+                        "Error: '\(path)' is an image file, but the current model does not support vision, so it cannot be viewed. Read text files instead."
+                    )
+                }
+                switch ImageSupport.load(atPath: path) {
+                case .loaded(let attachment, let width, let height):
+                    let sizeKB = attachment.base64.count * 3 / 4 / 1024
+                    let format = attachment.mimeType
+                        .replacingOccurrences(of: "image/", with: "")
+                        .uppercased()
+                    Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
+                    return ToolResult(
+                        text: "Image of '\(path)' (\(format), \(width)x\(height), \(sizeKB) KB). The image is attached to this result.",
+                        image: attachment
+                    )
+                case .notAnImage:
+                    break
+                case .fileTooLarge(let bytes):
+                    Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
+                    return ToolResult("Error: '\(path)' is too large to read as an image (\(bytes) bytes; the limit is \(ImageSupport.maxFileBytes)).")
+                case .decodeFailed:
+                    Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "failed", sendJSON: sendJSON)
+                    return ToolResult("Error: '\(path)' looks like an image but could not be decoded.")
+                }
+            }
+            if ImageSupport.looksBinary(head) {
+                Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
+                return ToolResult("Error: '\(path)' is a binary file, not text. read_file can read text files and image files (PNG, JPEG, GIF, WebP, TIFF, BMP, HEIC), but not other binary formats.")
+            }
+        }
         
         var params: [String: Any] = [
             "sessionId": sessionId,
@@ -473,7 +535,7 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
             )
             if let content = Self.parseXcodeReadContent(bridgeResult) {
                 Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
-                return content
+                return ToolResult(content)
             }
         }
         
@@ -486,7 +548,7 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
                 
                 Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
                 
-                return response
+                return ToolResult(response)
                 
             case .error(let message):
                 throw ACPError.message("Error reading text file \(path): message \(message)")
@@ -497,7 +559,7 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
             // the local disk when the file exists there.
             if let local = Self.readLocalTextFile(path, line: args["line"] as? Int, limit: args["limit"] as? Int) {
                 Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
-                return local
+                return ToolResult(local)
             }
             
             // Without a terminal update the client's tool-call spinner
@@ -505,9 +567,9 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
             Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "failed", sendJSON: sendJSON)
             
             if case ACPError.message(let reason) = error {
-                return reason
+                return ToolResult(reason)
             }
-            return "Other error reading text file: \(error.localizedDescription)"
+            return ToolResult("Other error reading text file: \(error.localizedDescription)")
         }
     }
     
@@ -1229,6 +1291,15 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
         }
     }
     
+    /// Reads the first `count` bytes of a file (for magic-byte sniffing)
+    /// without loading the whole file. Returns nil when the file cannot be
+    /// opened.
+    private static func peekHeadBytes(atPath path: String, count: Int = 16 * 1024) -> Data? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        return handle.readData(ofLength: count)
+    }
+
     /// Reads a file directly from the local disk, applying the same 1-based
     /// `line` / `limit` window the ACP client read would apply. Returns nil
     /// when the file does not exist or is not valid UTF-8. Used as a
