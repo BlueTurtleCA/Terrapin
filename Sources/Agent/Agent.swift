@@ -66,6 +66,10 @@ public struct Agent: Sendable {
         client: ClientKind,
         supportsCompaction: Bool,
         tools: [ToolDefinition],
+        /// Session-scoped tool providers (per-session MCP clients, e.g. the
+        /// Android Studio "ide-tools" bridge), layered onto the base
+        /// registry for this turn only.
+        sessionTools: [any ToolProvider] = [],
         onChunk: @escaping @Sendable (String) -> Void,
         onThought: @escaping @Sendable (String) -> Void,
         onSendJSON: @escaping @Sendable ([String: Any]) -> Void
@@ -139,9 +143,15 @@ public struct Agent: Sendable {
         // can reuse its KV cache across turns and only process the delta.
         let slotId = Self.slotId(for: sessionId, count: slotCount)
 
+        // Session-scoped providers are layered onto the base registry for
+        // this turn only (see ACPServer.handlePrompt).
+        let turnRegistry = sessionTools.isEmpty
+            ? toolRegistry
+            : toolRegistry.combined(with: sessionTools)
+
         // Open the Xcode workspace up front so workspace tools work on the
         // first call and the user's access approval is requested immediately.
-        await toolRegistry.prepare(cwd: cwd)
+        await turnRegistry.prepare(cwd: cwd)
 
         let maxTurns = 500
         var currentTurn = 0
@@ -273,7 +283,7 @@ public struct Agent: Sendable {
                         continue
                     }
 
-                    let result = await toolRegistry.execute(
+                    let result = await turnRegistry.execute(
                         name: call.function.name,
                         argsJSON: call.function.arguments,
                         cwd: cwd,

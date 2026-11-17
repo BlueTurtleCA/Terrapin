@@ -206,6 +206,58 @@ struct ACPClientToolsImageTests {
         #expect(result.text.contains("does not support vision"))
     }
 
+    @Test func imageReadSendsImageContentToClient() async {
+        let temp = Temp()
+        let tools = makeTools(temp)
+        let path = writeImage(temp, name: "gradient.png", width: 400, height: 300, type: .png)
+
+        let lock = NSLock()
+        var sent: [[String: Any]] = []
+        let result = await tools.execute(
+            name: "read_file",
+            argsJSON: #"{"path": "\#(path)"}"#,
+            cwd: temp.url.path,
+            sessionId: "test",
+            sendJSON: { json in
+                lock.lock()
+                sent.append(json)
+                lock.unlock()
+            }
+        )
+
+        #expect(result.image != nil)
+
+        // The completed tool_call_update must carry the picture as ACP
+        // content so the client can show it, not just the status change.
+        let updates: [[String: Any]] = sent.compactMap { json in
+            (json["params"] as? [String: Any])?["update"] as? [String: Any]
+        }
+        let completion = updates.first { ($0["status"] as? String) == "completed" }
+        guard let content = completion?["content"] as? [[String: Any]] else {
+            Issue.record("completed update has no content")
+            return
+        }
+        #expect(content.contains {
+            ($0["type"] as? String) == "content"
+                && (($0["content"] as? [String: Any])?["type"] as? String) == "text"
+        })
+        let imageBlock = content.compactMap { item -> [String: Any]? in
+            guard (item["type"] as? String) == "content" else { return nil }
+            let block = item["content"] as? [String: Any]
+            return (block?["type"] as? String) == "image" ? block : nil
+        }.first
+        #expect(imageBlock != nil)
+        #expect(["image/png", "image/jpeg"].contains(imageBlock?["mimeType"] as? String ?? ""))
+        guard let base64 = imageBlock?["data"] as? String, !base64.isEmpty,
+              let decoded = Data(base64Encoded: base64), !decoded.isEmpty
+        else {
+            Issue.record("image content block has no decodable base64 data")
+            return
+        }
+        // The client must receive the exact payload the model is given.
+        #expect(base64 == result.image?.base64)
+    }
+
     @Test func readFileDefinitionTracksVisionSupport() async {
         let disabled = ACPClientTools(clientChannel: ClientChannel(), supportsVision: false)
         let enabled = ACPClientTools(clientChannel: ClientChannel())

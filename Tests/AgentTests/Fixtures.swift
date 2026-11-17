@@ -385,6 +385,7 @@ func makeStubSession() -> URLSession {
 let testTemplates: [ClientKind: String] = [
     .xcode: "XCODE {{CWD}}|{{PLATFORM_INSTRUCTIONS}}|{{TERMINAL_TOOLS}}|{{NETWORK_STATUS}}|{{SKILLS}}|{{CUSTOM_INSTRUCTIONS}}",
     .generic(name: "unknown"): "GENERIC {{CWD}}|{{PLATFORM_INSTRUCTIONS}}|{{TERMINAL_TOOLS}}|{{NETWORK_STATUS}}|{{SKILLS}}|{{CUSTOM_INSTRUCTIONS}}",
+    .androidstudio: "ANDROID {{CWD}}|{{PLATFORM_INSTRUCTIONS}}|{{TERMINAL_TOOLS}}|{{NETWORK_STATUS}}|{{SKILLS}}|{{CUSTOM_INSTRUCTIONS}}",
 ]
 
 /// A skill used to assert the catalog block in the system prompt.

@@ -22,6 +22,7 @@ final class ACPServer: Sendable {
     private let logger: Loggable
     private let clientChannel: ClientChannel
     private let clientTools: ACPClientTools
+    private let debugLog: Bool
     private let stdoutLock = NSLock()
     // In-flight session/prompt tasks, keyed by session id. Guarded by
     // taskLock so session/cancel can find and stop the running turn.
@@ -37,6 +38,11 @@ final class ACPServer: Sendable {
     // Set once when the Xcode MCP bridge is started; the stdin loop is
     // sequential, so no locking is needed.
     private nonisolated(unsafe) var xcodeBridgeReady = false
+    // MCP servers the client declared per session (ACP mcpServers
+    // parameter, e.g. Android Studio's "ide-tools" bridge), keyed by
+    // session id. Written only in the sequential stdin loop, so no locking
+    // is needed.
+    private nonisolated(unsafe) var mcpClients: [String: [any MCPClientHandle]] = [:]
 
     init(
         agent: Agent,
@@ -46,6 +52,7 @@ final class ACPServer: Sendable {
         clientChannel: ClientChannel,
         clientTools: ACPClientTools,
         defaultClient: ClientKind,
+        debugLog: Bool,
         logger: Loggable
     ) {
         self.agent = agent
@@ -53,6 +60,7 @@ final class ACPServer: Sendable {
         self.toolRegistry = toolRegistry
         self.xcodeBridge = xcodeBridge
         self.defaultClient = defaultClient
+        self.debugLog = debugLog
         self.logger = logger
         self.clientChannel = clientChannel
         self.clientTools = clientTools
@@ -177,6 +185,10 @@ final class ACPServer: Sendable {
                     // support. An empty array is a type mismatch that strict
                     // clients (Android Studio) fail to deserialize.
                     "sessionCapabilities": ["delete": [:]],
+                    "mcpCapabilities": [
+                        "http": true,
+                        "sse": true
+                    ]
                 ],
                 "agentInfo": ["name": "Terrapin", "version": "1.0.0"],
                 "authMethods": [],
@@ -200,13 +212,78 @@ final class ACPServer: Sendable {
 
         // Xcode-only setup: spawn the mcpbridge and register its tools the
         // first time an Xcode session is created or loaded.
-        await ensureXcodeBridge()
+        //await ensureXcodeBridge()
+
+        // Clients may declare stdio MCP servers for the session (Android
+        // Studio's "ide-tools" bridge); start them and register their tools.
+        await setupMCPServers(params: params, cwd: cwd, sessionId: newSessionId)
 
         sendJSON([
             "jsonrpc": "2.0",
             "id": reqId.value,
             "result": ["sessionId": newSessionId],
         ])
+    }
+
+    /// Starts the MCP servers the client declared for this session in the
+    /// ACP `mcpServers` parameter (stdio, http, and sse) and keeps the live
+    /// clients in `mcpClients`, keyed by session. Their tools are layered
+    /// onto the shared registry per prompt (see handlePrompt) instead of
+    /// being registered globally: the registry is process-wide, and a
+    /// second session from the same IDE declaring the same server must not
+    /// duplicate the first session's tools in every LLM request. Failures
+    /// are logged and swallowed so a broken IDE MCP server degrades to no
+    /// IDE tools instead of wedging the session.
+    private func setupMCPServers(params: [String: Any]?, cwd: String, sessionId: String) async {
+        let descriptors = MCPServerDescriptor.parse(
+            from: params,
+            cwd: cwd.isEmpty ? nil : cwd
+        )
+        guard !descriptors.isEmpty, mcpClients[sessionId] == nil else { return }
+
+        var clients: [any MCPClientHandle] = []
+        for descriptor in descriptors {
+            let client: any MCPClientHandle
+            switch descriptor.transport {
+            case .stdio:
+                let stdioClient = MCPStdioClient(
+                    descriptor: descriptor,
+                    logger: logger,
+                    debugLog: debugLog
+                )
+                do {
+                    try await stdioClient.start()
+                } catch {
+                    logger.debug("MCP server '\(descriptor.name)' failed to start: \(error)")
+                    continue
+                }
+                client = stdioClient
+            case .http, .sse:
+                let httpClient = MCPHTTPClient(
+                    descriptor: descriptor,
+                    logger: logger,
+                    debugLog: debugLog
+                )
+                do {
+                    try await httpClient.start()
+                } catch {
+                    logger.debug("MCP server '\(descriptor.name)' failed to start: \(error)")
+                    continue
+                }
+                client = httpClient
+            }
+
+            let tools = await client.fetchTools()
+            logger.debug("MCP server '\(descriptor.name)': \(tools.count) tools available")
+            guard !tools.isEmpty else {
+                await client.stop()
+                continue
+            }
+            clients.append(client)
+        }
+        if !clients.isEmpty {
+            mcpClients[sessionId] = clients
+        }
     }
 
     /// Spawns the Xcode MCP bridge and registers its tools with the registry.
@@ -265,6 +342,11 @@ final class ACPServer: Sendable {
         }
 
         await ensureXcodeBridge()
+
+        // Same stdio MCP server setup as session/new; a repeated load of the
+        // same session is a no-op (setupMCPServers guards on the stored list).
+        let cwd = await sessionStore.getCWD(for: sessionId) ?? clientCwd
+        await setupMCPServers(params: params, cwd: cwd, sessionId: sessionId)
 
         // Replay the conversation so the client can display it. Tool calls
         // and tool results are not replayed; the full history is retained
@@ -325,6 +407,13 @@ final class ACPServer: Sendable {
             return
         }
 
+        // Stop the MCP server processes this session spawned (e.g. the
+        // Android Studio "ide-tools" `nc` pipe) so they do not outlive the
+        // conversation.
+        for client in mcpClients.removeValue(forKey: sessionId) ?? [] {
+            await client.stop()
+        }
+
         await sessionStore.deleteSession(for: sessionId)
         releaseLeakedTerminals(for: sessionId)
 
@@ -349,8 +438,16 @@ final class ACPServer: Sendable {
         let cwd =
             await sessionStore.getCWD(for: sessionId)
             ?? Self.extractParam(params, key: "cwd")
-        
-        let tools = await self.toolRegistry.definitions()
+
+        // Layer this session's MCP clients (e.g. Android Studio's
+        // "ide-tools") onto the shared, process-wide registry for this
+        // turn only, so a session never sees another session's tool
+        // connections.
+        let sessionClients = mcpClients[sessionId] ?? []
+        let turnRegistry = sessionClients.isEmpty
+            ? self.toolRegistry
+            : self.toolRegistry.combined(with: sessionClients)
+        let tools = await turnRegistry.definitions()
 
         let box = PromptTaskBox()
         let task = Task.detached {
@@ -361,6 +458,7 @@ final class ACPServer: Sendable {
                 client: self.clientKind,
                 supportsCompaction: self.supportsCompaction,
                 tools: tools,
+                sessionTools: sessionClients,
                 onChunk: { text in
                     self.sendChunk(sessionId: sessionId, text: text)
                 },
@@ -418,8 +516,10 @@ final class ACPServer: Sendable {
     /// ClientChannel callers (awaiting them inline would block the loop
     /// until every request timed out).
     private func releaseLeakedTerminals(for sessionId: String) {
-        Task.detached { [clientTools, logger] in
-            let released = await clientTools.releaseAllTerminals(for: sessionId)
+        Task.detached { [clientTools, logger, self] in
+            let released = await clientTools.releaseAllTerminals(for: sessionId) { [weak self] json in
+                self?.sendJSON(json)
+            }
             if released > 0 {
                 logger.debug("Released \(released) leaked terminal(s) for session \(sessionId)")
             }

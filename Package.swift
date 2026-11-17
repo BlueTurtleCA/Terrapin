@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "Terrapin",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v15)
     ],
     products: [
         .executable(
@@ -39,6 +39,7 @@ let package = Package(
             resources: [
                 .process("Resources/system_prompt_xcode.md"),
                 .process("Resources/system_prompt_generic.md"),
+                .process("Resources/system_prompt_androidstudio.md"),
                 .process("Resources/platform_instructions_mac.md"),
                 .process("Resources/platform_instructions_windows.md"),
                 .process("Resources/platform_instructions_linux.md"),

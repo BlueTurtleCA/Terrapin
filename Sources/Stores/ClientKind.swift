@@ -13,6 +13,8 @@ import Foundation
 public enum ClientKind: Sendable, Hashable {
     /// Xcode 27, which drives the native `xcrun mcpbridge` toolset.
     case xcode
+    /// Android Studio, which drives sessions in Android/Gradle projects.
+    case androidstudio
     /// Any other ACP client (VS Code, Zed, JetBrains, ...).
     case generic(name: String)
 
@@ -45,6 +47,10 @@ public enum ClientKind: Sendable, Hashable {
             return .xcode
         }
         #endif
+
+        if identity.contains("android") {
+            return .androidstudio
+        }
 
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
         guard !trimmedName.isEmpty else { return effectiveFallback }

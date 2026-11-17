@@ -63,9 +63,15 @@ struct Config: Sendable {
             (argValue("--default-client", in: args)
                 ?? env["AI_DEFAULT_CLIENT"])
             .map {
-                $0.lowercased() == "generic"
-                    ? ClientKind.generic(name: "unknown")
-                    : ClientKind.xcode
+                let value = $0.lowercased()
+                switch value {
+                case "generic":
+                    return ClientKind.generic(name: "unknown")
+                case "androidstudio", "android-studio", "android_studio":
+                    return ClientKind.androidstudio
+                default:
+                    return ClientKind.xcode
+                }
             }
             ?? .xcode
         let skillDirectories = Self.skillDirectories(args: args, env: env)

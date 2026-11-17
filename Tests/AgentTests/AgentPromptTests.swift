@@ -113,6 +113,17 @@ struct AgentPromptTests {
         #expect(systemPrompt(harness).hasPrefix("GENERIC "))
     }
 
+    @Test("the androidstudio client selects its own template")
+    func androidStudioTemplate() async {
+        let harness = makeAgentHarness(
+            llm: FakeLLMClient(responses: [.response(LLMResponse(content: "ok"))])
+        )
+        let recorder = Recorder()
+        await harness.run(prompt: "hi", client: .androidstudio, recorder: recorder)
+
+        #expect(systemPrompt(harness).hasPrefix("ANDROID "))
+    }
+
     // Templates for the vision tests: every placeholder separated by "|", so
     // the built prompt splits into [CWD, NATIVE_TOOLS, VISION_STATUS].
     private let visionTemplates: [ClientKind: String] = [

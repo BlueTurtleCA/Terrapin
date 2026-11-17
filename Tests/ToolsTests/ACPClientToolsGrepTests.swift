@@ -48,9 +48,9 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func wholeTreeRegexCaseInsensitive() async {
-        let (tools, cwd, temp) = makeWorkspace()
+        let workspace = makeWorkspace()
         let result = await grep(
-            tools, cwd,
+            workspace.tools, workspace.cwd,
             #"{"query": "canimport", "caseSensitive": false, "isRegex": true}"#
         )
         let lines = result.components(separatedBy: "\n")
@@ -63,9 +63,9 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func directoryGlobRestrictsToSources() async {
-        let (tools, cwd, temp) = makeWorkspace()
+        let workspace = makeWorkspace()
         let result = await grep(
-            tools, cwd,
+            workspace.tools, workspace.cwd,
             #"{"query": "canimport", "pathPattern": "Sources/**", "caseSensitive": false, "isRegex": true}"#
         )
         let lines = result.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -74,9 +74,9 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func basenameGlobFiltersByExtension() async {
-        let (tools, cwd, temp) = makeWorkspace()
+        let workspace = makeWorkspace()
         let result = await grep(
-            tools, cwd,
+            workspace.tools, workspace.cwd,
             #"{"query": "canimport", "pathPattern": "*.swift", "caseSensitive": false, "isRegex": true}"#
         )
         let lines = result.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -85,9 +85,9 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func literalCaseSensitive() async {
-        let (tools, cwd, temp) = makeWorkspace()
+        let workspace = makeWorkspace()
         let result = await grep(
-            tools, cwd,
+            workspace.tools, workspace.cwd,
             #"{"query": "CanImport", "caseSensitive": true, "isRegex": false}"#
         )
         let lines = result.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -96,38 +96,38 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func noMatchesReturnsMessage() async {
-        let (tools, cwd, temp) = makeWorkspace()
+        let workspace = makeWorkspace()
         let result = await grep(
-            tools, cwd,
+            workspace.tools, workspace.cwd,
             #"{"query": "no-such-xyzzy", "caseSensitive": true, "isRegex": true}"#
         )
         #expect(result == "No matches found for 'no-such-xyzzy'.")
     }
 
     @Test func unmatchedDirectoryGlobReportsNoFiles() async {
-        let (tools, cwd, temp) = makeWorkspace()
+        let workspace = makeWorkspace()
         let result = await grep(
-            tools, cwd,
+            workspace.tools, workspace.cwd,
             #"{"query": "canimport", "pathPattern": "Nope/*", "caseSensitive": true, "isRegex": true}"#
         )
         #expect(result.contains("No files match path pattern 'Nope/*'"))
     }
 
     @Test func invalidRegexReportsFailure() async {
-        let (tools, cwd, temp) = makeWorkspace()
+        let workspace = makeWorkspace()
         let result = await grep(
-            tools, cwd,
+            workspace.tools, workspace.cwd,
             #"{"query": "([unclosed", "caseSensitive": true, "isRegex": true}"#
         )
         #expect(result.hasPrefix("Grep execution failed"))
     }
 
     @Test func listDirectoryShowsNamesAndSizes() async {
-        let (tools, cwd, temp) = makeWorkspace()
-        let result = (await tools.execute(
+        let workspace = makeWorkspace()
+        let result = (await workspace.tools.execute(
             name: "list_directory",
             argsJSON: "{}",
-            cwd: cwd,
+            cwd: workspace.cwd,
             sessionId: "test",
             sendJSON: { _ in }
         )).text
@@ -139,11 +139,11 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func listDirectoryMissingPathIsError() async {
-        let (tools, cwd, temp) = makeWorkspace()
-        let result = (await tools.execute(
+        let workspace = makeWorkspace()
+        let result = (await workspace.tools.execute(
             name: "list_directory",
             argsJSON: #"{"path": "does-not-exist"}"#,
-            cwd: cwd,
+            cwd: workspace.cwd,
             sessionId: "test",
             sendJSON: { _ in }
         )).text
@@ -151,12 +151,12 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func listEmptyDirectory() async {
-        let (tools, cwd, temp) = makeWorkspace()
-        try? FileManager.default.createDirectory(atPath: cwd + "/empty", withIntermediateDirectories: true)
-        let result = (await tools.execute(
+        let workspace = makeWorkspace()
+        try? FileManager.default.createDirectory(atPath: workspace.cwd + "/empty", withIntermediateDirectories: true)
+        let result = (await workspace.tools.execute(
             name: "list_directory",
             argsJSON: #"{"path": "empty"}"#,
-            cwd: cwd,
+            cwd: workspace.cwd,
             sessionId: "test",
             sendJSON: { _ in }
         )).text
@@ -164,12 +164,12 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func readFileStripsCRLFLineEndings() async {
-        let (tools, cwd, temp) = makeWorkspace()
-        temp.write("crlf.txt", "first line\r\nsecond line\r\nthird line\r\n")
-        let result = (await tools.execute(
+        let workspace = makeWorkspace()
+        workspace.temp.write("crlf.txt", "first line\r\nsecond line\r\nthird line\r\n")
+        let result = (await workspace.tools.execute(
             name: "read_file",
             argsJSON: #"{"path": "crlf.txt", "line": 2, "limit": 2}"#,
-            cwd: cwd,
+            cwd: workspace.cwd,
             sessionId: "test",
             sendJSON: { _ in }
         )).text
@@ -177,21 +177,21 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func readFileResolvesWorkspaceNamePrefixAndAbsolutePaths() async {
-        let (tools, cwd, temp) = makeWorkspace()
-        let rootName = (cwd as NSString).lastPathComponent
-        let prefixed = (await tools.execute(
+        let workspace = makeWorkspace()
+        let rootName = (workspace.cwd as NSString).lastPathComponent
+        let prefixed = (await workspace.tools.execute(
             name: "read_file",
             argsJSON: #"{"path": "\#(rootName)/notes.txt"}"#,
-            cwd: cwd,
+            cwd: workspace.cwd,
             sessionId: "test",
             sendJSON: { _ in }
         )).text
         #expect(prefixed == "canimport in notes\n")
         
-        let absolute = (await tools.execute(
+        let absolute = (await workspace.tools.execute(
             name: "read_file",
-            argsJSON: #"{"path": "\#(cwd)/notes.txt"}"#,
-            cwd: cwd,
+            argsJSON: #"{"path": "\#(workspace.cwd)/notes.txt"}"#,
+            cwd: workspace.cwd,
             sessionId: "test",
             sendJSON: { _ in }
         )).text
@@ -199,18 +199,18 @@ struct ACPClientToolsGrepTests {
     }
 
     @Test func moveFileRefusesDestinationOutsideWorkspace() async {
-        let (tools, cwd, temp) = makeWorkspace()
-        let outside = temp.url.deletingLastPathComponent()
+        let workspace = makeWorkspace()
+        let outside = workspace.temp.url.deletingLastPathComponent()
             .appendingPathComponent("outside-\(UUID().uuidString).txt")
-        let result = (await tools.execute(
+        let result = (await workspace.tools.execute(
             name: "move_file",
             argsJSON: #"{"path": "notes.txt", "newPath": "\#(outside.path)"}"#,
-            cwd: cwd,
+            cwd: workspace.cwd,
             sessionId: "test",
             sendJSON: { _ in }
         )).text
         #expect(result.contains("path is outside the workspace"))
         #expect(!FileManager.default.fileExists(atPath: outside.path))
-        #expect(FileManager.default.fileExists(atPath: cwd + "/notes.txt"))
+        #expect(FileManager.default.fileExists(atPath: workspace.cwd + "/notes.txt"))
     }
 }

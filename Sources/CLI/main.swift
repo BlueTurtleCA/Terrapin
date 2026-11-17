@@ -107,6 +107,7 @@ let server = ACPServer(
     clientChannel: clientChannel,
     clientTools: clientTools,
     defaultClient: config.defaultClient,
+    debugLog: config.debugLog,
     logger: logger
 )
 logger.debug("=== Swift ACP Agent Started with Tool Calling ===")
@@ -129,6 +130,7 @@ func loadSystemPromptTemplates() -> [ClientKind: String] {
     return [
         .xcode: load("system_prompt_xcode"),
         .generic(name: "unknown"): load("system_prompt_generic"),
+        .androidstudio: load("system_prompt_androidstudio"),
     ]
 }
 

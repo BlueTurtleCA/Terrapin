@@ -81,10 +81,26 @@ public struct ToolRegistry: Sendable {
         providers.add(provider)
     }
 
+    /// A new registry that layers `additional` providers on top of this
+    /// one's, for use by a single turn. Session-scoped MCP clients live
+    /// here instead of in the shared registry so one session's IDE tools
+    /// are never mixed into (and duplicated in) another session's.
+    public func combined(with additional: [any ToolProvider]) -> ToolRegistry {
+        ToolRegistry(providers.all() + additional)
+    }
+
     public func definitions() async -> [ToolDefinition] {
         var all: [ToolDefinition] = []
+        // Tool names must be unique in the LLM request (servers such as
+        // llama.cpp reject duplicates with a 400), so the first provider
+        // to advertise a name wins — the same order execute() routes by.
+        var seen = Set<String>()
         for provider in providers.all() {
-            all.append(contentsOf: await provider.definitions())
+            for definition in await provider.definitions()
+                where seen.insert(definition.function.name).inserted
+            {
+                all.append(definition)
+            }
         }
         return all
     }
