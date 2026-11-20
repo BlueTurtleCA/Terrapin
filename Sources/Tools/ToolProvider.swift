@@ -27,7 +27,8 @@ public struct ToolResult: Sendable {
     }
 }
 
-/// A source of tools the agent can call (Xcode MCP bridge, web tools, ...).
+/// A source of tools the agent can call (client-declared MCP servers, web
+/// tools, ...).
 public protocol ToolProvider: Sendable {
     func definitions() async -> [ToolDefinition]
     func execute(
@@ -37,48 +38,14 @@ public protocol ToolProvider: Sendable {
         sessionId: String,
         sendJSON: @escaping @Sendable ([String: Any]) -> Void
     ) async -> ToolResult
-
-    /// One-time setup for a working directory, run before the agent loop so
-    /// workspace-dependent tools are ready (e.g. opening the Xcode workspace
-    /// and surfacing the user's access-approval prompt up front).
-    func prepare(cwd: String) async
-}
-
-public extension ToolProvider {
-    func prepare(cwd: String) async {}
 }
 
 /// Routes tool calls to the provider that owns the tool.
 public struct ToolRegistry: Sendable {
-    private let providers: ProviderBox
-
-    /// Reference box around the provider list so providers can be registered
-    /// after the registry is created (the Xcode MCP bridge is added lazily
-    /// once the connecting client identifies itself as Xcode).
-    private final class ProviderBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var items: [any ToolProvider]
-
-        init(_ items: [any ToolProvider]) {
-            self.items = items
-        }
-
-        func all() -> [any ToolProvider] {
-            lock.withLock { items }
-        }
-
-        func add(_ provider: any ToolProvider) {
-            lock.withLock { items.append(provider) }
-        }
-    }
+    private let providers: [any ToolProvider]
 
     public init(_ providers: [any ToolProvider]) {
-        self.providers = ProviderBox(providers)
-    }
-
-    /// Registers an additional provider.
-    public func add(_ provider: any ToolProvider) {
-        providers.add(provider)
+        self.providers = providers
     }
 
     /// A new registry that layers `additional` providers on top of this
@@ -86,7 +53,7 @@ public struct ToolRegistry: Sendable {
     /// here instead of in the shared registry so one session's IDE tools
     /// are never mixed into (and duplicated in) another session's.
     public func combined(with additional: [any ToolProvider]) -> ToolRegistry {
-        ToolRegistry(providers.all() + additional)
+        ToolRegistry(providers + additional)
     }
 
     public func definitions() async -> [ToolDefinition] {
@@ -95,7 +62,7 @@ public struct ToolRegistry: Sendable {
         // llama.cpp reject duplicates with a 400), so the first provider
         // to advertise a name wins — the same order execute() routes by.
         var seen = Set<String>()
-        for provider in providers.all() {
+        for provider in providers {
             for definition in await provider.definitions()
                 where seen.insert(definition.function.name).inserted
             {
@@ -112,7 +79,7 @@ public struct ToolRegistry: Sendable {
         sessionId: String,
         sendJSON: @escaping @Sendable ([String: Any]) -> Void
     ) async -> ToolResult {
-        for provider in providers.all() {
+        for provider in providers {
             let providerTools = await provider.definitions()
             guard providerTools.contains(where: { $0.function.name == name }) else {
                 continue
@@ -126,11 +93,5 @@ public struct ToolRegistry: Sendable {
             )
         }
         return ToolResult("Error: Unknown tool '\(name)'")
-    }
-
-    public func prepare(cwd: String) async {
-        for provider in providers.all() {
-            await provider.prepare(cwd: cwd)
-        }
     }
 }

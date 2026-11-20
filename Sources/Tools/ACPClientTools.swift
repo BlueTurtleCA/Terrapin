@@ -9,8 +9,10 @@ import Foundation
 import Stores
 
 /// Native ACP client tools: the file and terminal tools the agent exposes
-/// through the ACP client channel (with an Xcode MCP bridge fast path where
-/// one is available).
+/// through the ACP client channel. The file tools route through the IDE's
+/// Xcode tools (XcodeRead, XcodeWrite, XcodeMV, XcodeRM, XcodeLS) when the
+/// client declared an MCP server that offers them, so the IDE stays in
+/// sync; each falls back to the ACP client channel otherwise.
 ///
 /// The implementation is split by domain across several files so each tool's
 /// behavior lives in one place; the model-facing schemas for all of them are
@@ -27,13 +29,21 @@ import Stores
 /// - ACP/ACPToolCallUpdates.swift — the session/update tool-call emitters
 public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     let clientChannel: ClientChannel
-    let xcodeBridge: XcodeMCPBridgeClient?
     /// The server's explicit statement about the model's vision support
     /// (from /v1/models); nil when the server does not report it. When the
-    /// server says no, image reads are refused and never advertised.
-    let supportsVision: Bool?
+    /// server says no, image reads are refused and never advertised, and
+    /// vision-only MCP tools are withheld from the model.
+    public let supportsVision: Bool?
     let lock = NSLock()
     private var capabilities = Capabilities()
+    // MCP clients the client declared for each session (the session's
+    // mcpServers — Xcode declares its own MCP server, Android Studio its
+    // "ide-tools" pipe), keyed by session id. The file tools route their
+    // Xcode* round-trips (XcodeRead, XcodeWrite, XcodeMV, XcodeRM, XcodeLS)
+    // through one of them. Written by the ACP server on session setup and
+    // teardown, read during tool execution, so it is guarded by the same
+    // lock as capabilities.
+    private var sessionMCPClients: [String: [any MCPClientHandle]] = [:]
     // Terminals still alive per session (created but not yet released), so
     // they can be released on session/cancel or session/delete. Each entry
     // remembers the tool call that embeds the terminal, so whoever releases
@@ -46,11 +56,9 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
     
     public init(
         clientChannel: ClientChannel,
-        xcodeBridge: XcodeMCPBridgeClient? = nil,
         supportsVision: Bool? = nil
     ) {
         self.clientChannel = clientChannel
-        self.xcodeBridge = xcodeBridge
         self.supportsVision = supportsVision
     }
     
@@ -117,6 +125,24 @@ public final class ACPClientTools: ToolProvider, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         self.capabilities = capabilities
+    }
+
+    /// Records the MCP clients the client declared for a session (the
+    /// session's mcpServers), or clears them when nil. Called by the ACP
+    /// server on session setup and teardown.
+    public func setSessionMCPClients(_ clients: [any MCPClientHandle]?, for sessionId: String) {
+        lock.withLock {
+            if let clients, !clients.isEmpty {
+                sessionMCPClients[sessionId] = clients
+            } else {
+                sessionMCPClients[sessionId] = nil
+            }
+        }
+    }
+
+    /// The MCP clients the client declared for `sessionId`, empty when none.
+    public func sessionMCPClients(for sessionId: String) -> [any MCPClientHandle] {
+        lock.withLock { sessionMCPClients[sessionId] ?? [] }
     }
     
     /// Releases every terminal the session still holds and returns how many

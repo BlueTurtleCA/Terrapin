@@ -168,7 +168,7 @@ struct ACPClientToolsGrepTests {
         workspace.temp.write("crlf.txt", "first line\r\nsecond line\r\nthird line\r\n")
         let result = (await workspace.tools.execute(
             name: "read_file",
-            argsJSON: #"{"path": "crlf.txt", "line": 2, "limit": 2}"#,
+            argsJSON: #"{"path": "crlf.txt", "start": 2, "end": 3}"#,
             cwd: workspace.cwd,
             sessionId: "test",
             sendJSON: { _ in }

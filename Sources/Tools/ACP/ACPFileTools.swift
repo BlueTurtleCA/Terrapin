@@ -39,8 +39,8 @@ extension ACPClientTools {
         )
         
         // Image files are read from the local disk (the ACP client and the
-        // Xcode bridge only handle text) and returned as an attachment so a
-        // vision model can see them. Other binaries are rejected up front
+        // IDE's XcodeRead only handle text) and returned as an attachment so
+        // a vision model can see them. Other binaries are rejected up front
         // instead of producing garbled text.
         if let head = Self.peekHeadBytes(atPath: path), !head.isEmpty {
             if ImageSupport.mimeType(of: head) != nil {
@@ -106,36 +106,48 @@ extension ACPClientTools {
             }
         }
         
+        // The model addresses the window as an inclusive 1-based start/end
+        // line range, but the downstream reads (the ACP client and XcodeRead)
+        // take a start line plus a line count, so derive the count from the
+        // range.
+        let startLine = max(args["start"] as? Int ?? 1, 1)
+        if let endLine = args["end"] as? Int, endLine < startLine {
+            // Inverted range: there is nothing to read.
+            Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
+            return ToolResult("")
+        }
+        let lineCount = (args["end"] as? Int).map { $0 - startLine + 1 }
+        
         var params: [String: Any] = [
             "sessionId": sessionId,
             "path": path,
         ]
-        if let line = args["line"] as? Int {
-            params["line"] = line
+        if args["start"] != nil {
+            params["line"] = startLine
         }
-        if let limit = args["limit"] as? Int {
-            params["limit"] = limit
+        if let lineCount {
+            params["limit"] = lineCount
         }
         
-        // Prefer the Xcode bridge so reads see unsaved editor changes and
-        // stay in sync with the IDE; fall back to the ACP client read when
-        // the bridge is unavailable or the file is outside the project.
-        if let bridge = xcodeBridge, await bridge.isStarted {
-            var bridgeArgs: [String: Any] = [
+        // Prefer the IDE's XcodeRead (Xcode declares it in the session's
+        // mcpServers) so reads see unsaved editor changes and stay in sync
+        // with the IDE; fall back to the ACP client read when the IDE does
+        // not offer it or the file is outside the project.
+        if let xcodeMCP = await self.xcodeToolClient(for: sessionId, toolName: "XcodeRead") {
+            var xcodeArgs: [String: Any] = [
                 "filePath": Self.workspaceRelativePath(path, workspaceRoot: cwd)
             ]
-            if let line = args["line"] as? Int {
-                bridgeArgs["offset"] = line
+            if args["start"] != nil {
+                xcodeArgs["offset"] = startLine
             }
-            if let limit = args["limit"] as? Int {
-                bridgeArgs["limit"] = limit
+            if let lineCount {
+                xcodeArgs["limit"] = lineCount
             }
-            let bridgeResult = await bridge.callTool(
+            let xcodeResult = await xcodeMCP.callTool(
                 name: "XcodeRead",
-                argsJSON: Self.makeArgsJSON(bridgeArgs),
-                cwd: cwd
+                argsJSON: Self.makeArgsJSON(xcodeArgs)
             )
-            if let content = Self.parseXcodeReadContent(bridgeResult) {
+            if let content = Self.parseXcodeReadContent(xcodeResult) {
                 Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
                 return ToolResult(content)
             }
@@ -159,7 +171,7 @@ extension ACPClientTools {
             // The client could not answer (timeout, error, ...). The agent
             // runs on the same machine as the workspace, so fall back to
             // the local disk when the file exists there.
-            if let local = Self.readLocalTextFile(path, line: args["line"] as? Int, limit: args["limit"] as? Int) {
+            if let local = Self.readLocalTextFile(path, start: args["start"] as? Int, end: args["end"] as? Int) {
                 Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
                 return ToolResult(local)
             }
@@ -174,7 +186,22 @@ extension ACPClientTools {
             return ToolResult("Other error reading text file: \(error.localizedDescription)")
         }
     }
-    
+
+    /// Finds the session's MCP client that advertises the named Xcode tool
+    /// (Xcode declares its tools in the session's mcpServers list).
+    /// Returns nil when no declared server offers it. The check uses the
+    /// unfiltered advertised list, not definitions(): the client's allowlist
+    /// hides these tools from the model but must not hide them from this
+    /// routing.
+    private func xcodeToolClient(for sessionId: String, toolName: String) async -> (any MCPClientHandle)? {
+        for client in sessionMCPClients(for: sessionId)
+        where await client.advertisedToolNames().contains(toolName)
+        {
+            return client
+        }
+        return nil
+    }
+
     func writeTextFile(argsJSON: String, cwd: String, sessionId: String, sendJSON: ([String: Any]) -> Void) async -> String {
         let callId = "call_" + UUID().uuidString
         
@@ -203,17 +230,20 @@ extension ACPClientTools {
             sendJSON: sendJSON
         )
         
-        // Prefer the Xcode bridge so the IDE stays in sync (open editors,
-        // project references for new files); fall back to the ACP client
-        // write when it fails (e.g. the file is outside the project).
-        if let bridge = xcodeBridge, await bridge.isStarted {
-            let relPath = Self.workspaceRelativePath(path, workspaceRoot: cwd)
-            let bridgeResult = await bridge.callTool(
+        // Prefer the IDE's XcodeWrite (Xcode declares it in the session's
+        // mcpServers) so the IDE stays in sync (open editors, project
+        // references for new files); fall back to the ACP client write when
+        // the IDE does not offer it or the call fails (e.g. the file is
+        // outside the project).
+        if let xcodeMCP = await self.xcodeToolClient(for: sessionId, toolName: "XcodeWrite") {
+            let xcodeResult = await xcodeMCP.callTool(
                 name: "XcodeWrite",
-                argsJSON: Self.makeArgsJSON(["filePath": relPath, "content": content]),
-                cwd: cwd
+                argsJSON: Self.makeArgsJSON([
+                    "filePath": Self.workspaceRelativePath(path, workspaceRoot: cwd),
+                    "content": content
+                ])
             )
-            if !XcodeMCPBridgeClient.isBridgeError(bridgeResult) {
+            if !xcodeResult.hasPrefix("Error") {
                 Self.sendToolCallUpdate(
                     sessionId: sessionId,
                     callId: callId,
@@ -376,9 +406,27 @@ extension ACPClientTools {
             sendJSON: sendJSON
         )
         
+        // Prefer the IDE's XcodeMV (Xcode declares it in the session's
+        // mcpServers) so the IDE stays in sync (navigator, open editors,
+        // project references); fall back to the ACP primitives when the
+        // IDE does not offer it or the call fails.
+        if let xcodeMCP = await self.xcodeToolClient(for: sessionId, toolName: "XcodeMV") {
+            let xcodeResult = await xcodeMCP.callTool(
+                name: "XcodeMV",
+                argsJSON: Self.makeArgsJSON([
+                    "sourcePath": Self.workspaceRelativePath(path, workspaceRoot: cwd),
+                    "destinationPath": Self.workspaceRelativePath(newPath, workspaceRoot: cwd)
+                ])
+            )
+            if !xcodeResult.hasPrefix("Error") {
+                Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
+                return "File moved successfully: \(path) -> \(newPath)"
+            }
+        }
+        
         // The destination's parent directory may not exist yet (a move into
-        // a new subdirectory). Neither the Xcode bridge nor the ACP write
-        // creates it, so create any missing intermediate directories locally.
+        // a new subdirectory). The ACP write does not create it either, so
+        // create any missing intermediate directories locally first.
         let destinationDirectory = (newPath as NSString).deletingLastPathComponent
         if !destinationDirectory.isEmpty, !FileManager.default.fileExists(atPath: destinationDirectory) {
             do {
@@ -389,22 +437,6 @@ extension ACPClientTools {
             } catch {
                 Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "failed", sendJSON: sendJSON)
                 return "Error creating parent directory for '\(newPath)': \(error.localizedDescription)"
-            }
-        }
-        
-        // Prefer the Xcode bridge so the IDE stays in sync (navigator, open
-        // editors, project references); fall back to local operations.
-        if let bridge = xcodeBridge, await bridge.isStarted {
-            let from = Self.workspaceRelativePath(path, workspaceRoot: cwd)
-            let to = Self.workspaceRelativePath(newPath, workspaceRoot: cwd)
-            let bridgeResult = await bridge.callTool(
-                name: "XcodeMV",
-                argsJSON: Self.makeArgsJSON(["sourcePath": from, "destinationPath": to]),
-                cwd: cwd
-            )
-            if !XcodeMCPBridgeClient.isBridgeError(bridgeResult) {
-                Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
-                return "File moved successfully: \(path) -> \(newPath)"
             }
         }
         
@@ -466,16 +498,16 @@ extension ACPClientTools {
             sendJSON: sendJSON
         )
         
-        // Prefer the Xcode bridge so the IDE stays in sync (navigator, open
-        // editors, project references); fall back to local operations.
-        if let bridge = xcodeBridge, await bridge.isStarted {
-            let relPath = Self.workspaceRelativePath(path, workspaceRoot: cwd)
-            let bridgeResult = await bridge.callTool(
+        // Prefer the IDE's XcodeRM (Xcode declares it in the session's
+        // mcpServers) so the IDE stays in sync (navigator, open editors,
+        // project references); fall back to a local removal when the IDE
+        // does not offer it or the call fails.
+        if let xcodeMCP = await self.xcodeToolClient(for: sessionId, toolName: "XcodeRM") {
+            let xcodeResult = await xcodeMCP.callTool(
                 name: "XcodeRM",
-                argsJSON: Self.makeArgsJSON(["path": relPath]),
-                cwd: cwd
+                argsJSON: Self.makeArgsJSON(["path": Self.workspaceRelativePath(path, workspaceRoot: cwd)])
             )
-            if !XcodeMCPBridgeClient.isBridgeError(bridgeResult) {
+            if !xcodeResult.hasPrefix("Error") {
                 Self.sendToolCallUpdate(sessionId: sessionId, callId: callId, status: "completed", sendJSON: sendJSON)
                 return "File deleted successfully: \(path)"
             }
@@ -512,23 +544,25 @@ extension ACPClientTools {
             sendJSON: sendJSON
         )
         
+        // Prefer the IDE's XcodeLS (Xcode declares it in the session's
+        // mcpServers) so the listing reflects the project navigator; fall
+        // back to a local listing when the IDE does not offer it or the
+        // call fails (e.g. the directory is outside the project).
         var result: String
-        if let bridge = xcodeBridge, await bridge.isStarted {
-            let relPath = Self.workspaceRelativePath(path, workspaceRoot: cwd)
-            let bridgeResult = await bridge.callTool(
+        if let xcodeMCP = await self.xcodeToolClient(for: sessionId, toolName: "XcodeLS") {
+            let xcodeResult = await xcodeMCP.callTool(
                 name: "XcodeLS",
-                argsJSON: Self.makeArgsJSON(["path": relPath]),
-                cwd: cwd
+                argsJSON: Self.makeArgsJSON(["path": Self.workspaceRelativePath(path, workspaceRoot: cwd)])
             )
-            result = XcodeMCPBridgeClient.isBridgeError(bridgeResult) ? runListDirectory(path) : bridgeResult
+            result = xcodeResult.hasPrefix("Error") ? runListDirectory(path) : xcodeResult
         } else {
             result = runListDirectory(path)
         }
-        
+
         Self.sendToolCallUpdate(
             sessionId: sessionId,
             callId: callId,
-            status: XcodeMCPBridgeClient.isBridgeError(result) ? "failed" : "completed",
+            status: result.hasPrefix("Error") ? "failed" : "completed",
             sendJSON: sendJSON
         )
         
@@ -545,11 +579,11 @@ extension ACPClientTools {
     }
 
     /// Reads a file directly from the local disk, applying the same 1-based
-    /// `line` / `limit` window the ACP client read would apply. Returns nil
-    /// when the file does not exist or is not valid UTF-8. Used as a
-    /// fallback when the client cannot answer (timeout, error, ...), since
-    /// the agent runs on the same machine as the workspace.
-    private static func readLocalTextFile(_ path: String, line: Int?, limit: Int?) -> String? {
+    /// inclusive `start` / `end` line window the ACP client read would apply.
+    /// Returns nil when the file does not exist or is not valid UTF-8. Used
+    /// as a fallback when the client cannot answer (timeout, error, ...),
+    /// since the agent runs on the same machine as the workspace.
+    private static func readLocalTextFile(_ path: String, start: Int?, end: Int?) -> String? {
         guard FileManager.default.fileExists(atPath: path),
               let content = try? String(contentsOfFile: path, encoding: .utf8)
         else { return nil }
@@ -558,10 +592,11 @@ extension ACPClientTools {
         let lines = content
             .replacingOccurrences(of: "\r\n", with: "\n")
             .components(separatedBy: "\n")
-        let start = max((line ?? 1) - 1, 0)
-        guard start < lines.count else { return "" }
-        let end = limit.map { min(start + max($0, 0), lines.count) } ?? lines.count
-        return lines[start..<end].joined(separator: "\n")
+        let startIndex = max((start ?? 1) - 1, 0)
+        guard startIndex < lines.count else { return "" }
+        let endIndex = min(end.map { $0 - 1 } ?? lines.count - 1, lines.count - 1)
+        guard endIndex >= startIndex else { return "" }
+        return lines[startIndex...endIndex].joined(separator: "\n")
     }
     
     private func internalReadTextFile(clientChannel: ClientChannel, sessionId: String, path: String) async throws -> String {
@@ -584,7 +619,7 @@ extension ACPClientTools {
                 throw error
             }
         } catch {
-            if let local = Self.readLocalTextFile(path, line: nil, limit: nil) {
+            if let local = Self.readLocalTextFile(path, start: nil, end: nil) {
                 return local
             }
             throw error
@@ -610,9 +645,9 @@ extension ACPClientTools {
     /// XcodeRead answers with a JSON object whose `content` field holds the
     /// file in cat -n format (right-aligned line number, tab, text). Extracts
     /// that field and strips the line-number prefixes so the result matches
-    /// the plain content the ACP read returns. Returns nil when the bridge
-    /// result is not a successful XcodeRead response (error text, prose, ...),
-    /// in which case the caller falls back to the ACP client read.
+    /// the plain content the ACP read returns. Returns nil when the result
+    /// is not a successful XcodeRead response (error text, prose, ...), in
+    /// which case the caller falls back to the ACP client read.
     private static func parseXcodeReadContent(_ result: String) -> String? {
         guard let data = result.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

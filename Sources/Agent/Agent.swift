@@ -149,10 +149,6 @@ public struct Agent: Sendable {
             ? toolRegistry
             : toolRegistry.combined(with: sessionTools)
 
-        // Open the Xcode workspace up front so workspace tools work on the
-        // first call and the user's access approval is requested immediately.
-        await turnRegistry.prepare(cwd: cwd)
-
         let maxTurns = 500
         var currentTurn = 0
 
@@ -367,13 +363,19 @@ public struct Agent: Sendable {
         onChunk: @escaping @Sendable (String) -> Void,
         onSendJSON: @escaping @Sendable ([String: Any]) -> Void
     ) {
-        let freed = compaction.tokensBefore - compaction.tokensAfter
+        // Report message counts only: the token figures here mix a
+        // server-measured "before" with a character-based "after" estimate,
+        // which reads wildly off (2x or more) against the server's real
+        // tokenizer count, so they are not worth showing to the user.
         let summary = """
-            Compacted conversation: removed \(compaction.messagesRemoved) older messages (~\(Self.formatTokens(freed)) tokens); kept the most recent \(compaction.messagesKept) messages.
+            Compacted conversation: removed \(compaction.messagesRemoved) older messages; kept the most recent \(compaction.messagesKept) messages.
             """
 
         guard supportsCompaction else {
-            onChunk("ℹ️ \(summary)")
+            // Trailing newline: clients that render agent_message_chunk
+            // inline (e.g. Android Studio) would otherwise start the model's
+            // next message on the same line as this note.
+            onChunk("ℹ️ \(summary)\n")
             return
         }
 

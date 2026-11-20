@@ -17,7 +17,6 @@ final class ACPServer: Sendable {
     private let agent: Agent
     private let sessionStore: SessionStore
     private let toolRegistry: ToolRegistry
-    private let xcodeBridge: XcodeMCPBridgeClient
     private let defaultClient: ClientKind
     private let logger: Loggable
     private let clientChannel: ClientChannel
@@ -35,20 +34,14 @@ final class ACPServer: Sendable {
     // which gates compaction_update notifications. Written once in
     // handleInitialize and only read afterwards, so no locking is needed.
     private nonisolated(unsafe) var supportsCompaction = false
-    // Set once when the Xcode MCP bridge is started; the stdin loop is
-    // sequential, so no locking is needed.
-    private nonisolated(unsafe) var xcodeBridgeReady = false
-    // MCP servers the client declared per session (ACP mcpServers
-    // parameter, e.g. Android Studio's "ide-tools" bridge), keyed by
-    // session id. Written only in the sequential stdin loop, so no locking
-    // is needed.
-    private nonisolated(unsafe) var mcpClients: [String: [any MCPClientHandle]] = [:]
+    // The MCP servers the client declared per session (ACP mcpServers
+    // parameter — Xcode's own MCP server, Android Studio's "ide-tools"
+    // bridge, ...) live in clientTools, keyed by session id.
 
     init(
         agent: Agent,
         sessionStore: SessionStore,
         toolRegistry: ToolRegistry,
-        xcodeBridge: XcodeMCPBridgeClient,
         clientChannel: ClientChannel,
         clientTools: ACPClientTools,
         defaultClient: ClientKind,
@@ -58,7 +51,6 @@ final class ACPServer: Sendable {
         self.agent = agent
         self.sessionStore = sessionStore
         self.toolRegistry = toolRegistry
-        self.xcodeBridge = xcodeBridge
         self.defaultClient = defaultClient
         self.debugLog = debugLog
         self.logger = logger
@@ -210,12 +202,9 @@ final class ACPServer: Sendable {
             await sessionStore.setCWD(cwd, for: newSessionId)
         }
 
-        // Xcode-only setup: spawn the mcpbridge and register its tools the
-        // first time an Xcode session is created or loaded.
-        //await ensureXcodeBridge()
-
-        // Clients may declare stdio MCP servers for the session (Android
-        // Studio's "ide-tools" bridge); start them and register their tools.
+        // The client may declare MCP servers for the session (Xcode
+        // declares its own MCP server, Android Studio its "ide-tools"
+        // bridge); start them and register their tools.
         await setupMCPServers(params: params, cwd: cwd, sessionId: newSessionId)
 
         sendJSON([
@@ -227,7 +216,7 @@ final class ACPServer: Sendable {
 
     /// Starts the MCP servers the client declared for this session in the
     /// ACP `mcpServers` parameter (stdio, http, and sse) and keeps the live
-    /// clients in `mcpClients`, keyed by session. Their tools are layered
+    /// clients in clientTools, keyed by session. Their tools are layered
     /// onto the shared registry per prompt (see handlePrompt) instead of
     /// being registered globally: the registry is process-wide, and a
     /// second session from the same IDE declaring the same server must not
@@ -239,7 +228,10 @@ final class ACPServer: Sendable {
             from: params,
             cwd: cwd.isEmpty ? nil : cwd
         )
-        guard !descriptors.isEmpty, mcpClients[sessionId] == nil else { return }
+        guard
+            !descriptors.isEmpty,
+            clientTools.sessionMCPClients(for: sessionId).isEmpty
+        else { return }
 
         var clients: [any MCPClientHandle] = []
         for descriptor in descriptors {
@@ -249,7 +241,9 @@ final class ACPServer: Sendable {
                 let stdioClient = MCPStdioClient(
                     descriptor: descriptor,
                     logger: logger,
-                    debugLog: debugLog
+                    debugLog: debugLog,
+                    policy: MCPToolPolicy.forClient(clientKind),
+                    supportsVision: clientTools.supportsVision
                 )
                 do {
                     try await stdioClient.start()
@@ -262,7 +256,9 @@ final class ACPServer: Sendable {
                 let httpClient = MCPHTTPClient(
                     descriptor: descriptor,
                     logger: logger,
-                    debugLog: debugLog
+                    debugLog: debugLog,
+                    policy: MCPToolPolicy.forClient(clientKind),
+                    supportsVision: clientTools.supportsVision
                 )
                 do {
                     try await httpClient.start()
@@ -281,32 +277,7 @@ final class ACPServer: Sendable {
             }
             clients.append(client)
         }
-        if !clients.isEmpty {
-            mcpClients[sessionId] = clients
-        }
-    }
-
-    /// Spawns the Xcode MCP bridge and registers its tools with the registry.
-    /// Failures are logged and swallowed so the agent degrades to the
-    /// client-agnostic toolset instead of crashing.
-    private func setupXcodeBridge() async {
-        do {
-            try await xcodeBridge.start()
-        } catch {
-            logger.debug("Xcode MCP bridge failed to start: \(error)")
-            return
-        }
-        let bridgeTools = await xcodeBridge.fetchTools()
-        toolRegistry.add(xcodeBridge)
-        logger.debug("Xcode MCP bridge ready with \(bridgeTools.count) tools")
-    }
-
-    /// Spawns the Xcode MCP bridge on first use (session/new or session/load)
-    /// for Xcode clients.
-    private func ensureXcodeBridge() async {
-        guard clientKind == .xcode, !xcodeBridgeReady else { return }
-        xcodeBridgeReady = true
-        await setupXcodeBridge()
+        clientTools.setSessionMCPClients(clients, for: sessionId)
     }
 
     /// Handles session/load: restores a persisted session and replays its
@@ -341,9 +312,7 @@ final class ACPServer: Sendable {
             await sessionStore.setCWD(clientCwd, for: sessionId)
         }
 
-        await ensureXcodeBridge()
-
-        // Same stdio MCP server setup as session/new; a repeated load of the
+        // Same MCP server setup as session/new; a repeated load of the
         // same session is a no-op (setupMCPServers guards on the stored list).
         let cwd = await sessionStore.getCWD(for: sessionId) ?? clientCwd
         await setupMCPServers(params: params, cwd: cwd, sessionId: sessionId)
@@ -407,12 +376,13 @@ final class ACPServer: Sendable {
             return
         }
 
-        // Stop the MCP server processes this session spawned (e.g. the
-        // Android Studio "ide-tools" `nc` pipe) so they do not outlive the
-        // conversation.
-        for client in mcpClients.removeValue(forKey: sessionId) ?? [] {
+        // Stop the MCP servers this session started (Xcode's own MCP
+        // server, Android Studio's "ide-tools" pipe, ...) so they do not
+        // outlive the conversation.
+        for client in clientTools.sessionMCPClients(for: sessionId) {
             await client.stop()
         }
+        clientTools.setSessionMCPClients(nil, for: sessionId)
 
         await sessionStore.deleteSession(for: sessionId)
         releaseLeakedTerminals(for: sessionId)
@@ -439,11 +409,11 @@ final class ACPServer: Sendable {
             await sessionStore.getCWD(for: sessionId)
             ?? Self.extractParam(params, key: "cwd")
 
-        // Layer this session's MCP clients (e.g. Android Studio's
-        // "ide-tools") onto the shared, process-wide registry for this
-        // turn only, so a session never sees another session's tool
-        // connections.
-        let sessionClients = mcpClients[sessionId] ?? []
+        // Layer this session's MCP clients (Xcode's own MCP server,
+        // Android Studio's "ide-tools", ...) onto the shared, process-wide
+        // registry for this turn only, so a session never sees another
+        // session's tool connections.
+        let sessionClients = clientTools.sessionMCPClients(for: sessionId)
         let turnRegistry = sessionClients.isEmpty
             ? self.toolRegistry
             : self.toolRegistry.combined(with: sessionClients)

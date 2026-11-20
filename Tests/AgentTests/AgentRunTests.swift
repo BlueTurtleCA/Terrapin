@@ -56,17 +56,6 @@ struct AgentRunTests {
         #expect(second[3].content == "Again?")
     }
 
-    @Test("the tool registry is prepared before the loop")
-    func registryPrepared() async {
-        let harness = makeAgentHarness(
-            llm: FakeLLMClient(responses: [.response(LLMResponse(content: "ok"))])
-        )
-        let recorder = Recorder()
-        await harness.run(prompt: "hi", recorder: recorder)
-
-        #expect(harness.provider.preparedCwds == [harness.cwd])
-    }
-
     @Test("the context window is recorded on the session")
     func contextWindowRecorded() async {
         let harness = makeAgentHarness(

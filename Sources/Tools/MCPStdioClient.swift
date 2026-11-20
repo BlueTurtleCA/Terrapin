@@ -186,10 +186,11 @@ public enum MCPStdioClientError: Error, CustomStringConvertible {
     }
 }
 
-/// A client for one stdio MCP server declared by the ACP client. Unlike
-/// XcodeMCPBridgeClient it carries no Xcode-specific retry logic and — for
-/// now — no tool allowlist: every tool the server advertises is exposed to
-/// the model.
+/// A client for one stdio MCP server declared by the ACP client (Xcode's
+/// own MCP server, Android Studio's "ide-tools" bridge, ...). It carries
+/// no client-specific retry logic; which tools the model is offered and
+/// how they are presented is decided by the `MCPToolPolicy` (per ACP
+/// client) supplied at construction.
 ///
 /// The transport is line-buffered JSON-RPC over the process's stdio, per
 /// the MCP stdio spec, and every read is deadline-bounded so a server that
@@ -203,6 +204,13 @@ public actor MCPStdioClient: MCPClientHandle {
     private let descriptor: MCPServerDescriptor
     private let logger: Loggable
     private let debugLog: Bool
+    /// The connected client's policy for this server's tools (allowlist +
+    /// presentation).
+    private let policy: MCPToolPolicy
+    /// The server's statement about the model's vision support (nil when it
+    /// does not report it); gates the policy's vision-required tools in
+    /// definitions().
+    private let supportsVision: Bool?
 
     private var process: Process?
     private var inputPipe: Pipe?
@@ -220,12 +228,16 @@ public actor MCPStdioClient: MCPClientHandle {
         descriptor: MCPServerDescriptor,
         logger: Loggable,
         debugLog: Bool = false,
+        policy: MCPToolPolicy = .unrestricted,
+        supportsVision: Bool? = nil,
         handshakeTimeout: TimeInterval = 10,
         toolCallTimeout: TimeInterval = 600
     ) {
         self.descriptor = descriptor
         self.logger = logger
         self.debugLog = debugLog
+        self.policy = policy
+        self.supportsVision = supportsVision
         self.handshakeTimeout = handshakeTimeout
         self.toolCallTimeout = toolCallTimeout
     }
@@ -234,7 +246,17 @@ public actor MCPStdioClient: MCPClientHandle {
     public var isStarted: Bool { started }
     public var serverName: String { descriptor.name }
 
-    public func definitions() async -> [ToolDefinition] { tools }
+    /// The tools offered to the model: the advertised tools narrowed by
+    /// the policy allowlist (and by the policy's vision-required set when
+    /// the model does not support vision).
+    public func definitions() async -> [ToolDefinition] {
+        tools.filter { policy.isAllowed($0.function.name, supportsVision: supportsVision) }
+    }
+
+    /// Every tool name the server advertises, unfiltered by the policy.
+    public func advertisedToolNames() async -> [String] {
+        tools.map { $0.function.name }
+    }
 
     /// Spawns the server process and runs the MCP handshake
     /// (initialize → notifications/initialized). A server that starts but
@@ -306,8 +328,8 @@ public actor MCPStdioClient: MCPClientHandle {
         }
     }
 
-    /// Fetches every tool the server advertises (tools/list). First pass:
-    /// no allowlist, unlike the Xcode bridge.
+    /// Fetches every tool the server advertises (tools/list), unfiltered
+    /// by the policy allowlist (see definitions() and advertisedToolNames()).
     @discardableResult
     public func fetchTools() async -> [ToolDefinition] {
         // The server never completed the handshake, so a tools/list request
@@ -362,6 +384,7 @@ public actor MCPStdioClient: MCPClientHandle {
         sendJSON: ([String: Any]) -> Void
     ) async -> ToolResult {
         let callId = "call_" + UUID().uuidString
+        let category = policy.category(for: name)
         sendJSON([
             "jsonrpc": "2.0",
             "method": "session/update",
@@ -371,14 +394,14 @@ public actor MCPStdioClient: MCPClientHandle {
                     "sessionUpdate": "tool_call",
                     "toolCallId": callId,
                     "name": name,
-                    "title": name,
-                    "kind": "execute",
+                    "title": category.title,
+                    "kind": category.kind,
                     "status": "in_progress"
                 ]
             ]
         ])
 
-        let (text, image, isFailure) = callTool(name: name, argsJSON: argsJSON)
+        let (text, image, isFailure) = performToolCall(name: name, argsJSON: argsJSON)
         if debugLog {
             Self.appendDebugLog(server: descriptor.name, name: name, argsJSON: argsJSON, result: text)
         }
@@ -418,7 +441,15 @@ public actor MCPStdioClient: MCPClientHandle {
 
     // MARK: - Tool Calls
 
-    private func callTool(name: String, argsJSON: String)
+    /// One invisible tools/call round-trip: the raw text result, with a
+    /// failure prefix when the call did not succeed.
+    public func callTool(name: String, argsJSON: String) async -> String {
+        let (text, _, isFailure) = performToolCall(name: name, argsJSON: argsJSON)
+        guard isFailure else { return text }
+        return text.hasPrefix("Error") ? text : "Error: \(text)"
+    }
+
+    private func performToolCall(name: String, argsJSON: String)
         -> (text: String, image: ImageAttachment?, isFailure: Bool)
     {
         let argsDict: [String: Any] =

@@ -136,15 +136,14 @@ struct FakeToolCall: Sendable {
 }
 
 /// A ToolProvider with canned definitions and results. Records every
-/// execution and prepare call, and can run a hook after each execution
-/// (e.g. to cancel the agent's task mid-batch).
+/// execution and can run a hook after each execution (e.g. to cancel the
+/// agent's task mid-batch).
 final class FakeToolProvider: ToolProvider, @unchecked Sendable {
     private let lock = NSLock()
     private let toolDefinitions: [ToolDefinition]
     private let results: [String: String]
     private let images: [String: ImageAttachment]
     private var _executions: [FakeToolCall] = []
-    private var _preparedCwds: [String] = []
     private var _onExecute: (@Sendable (FakeToolCall) -> Void)?
 
     init(
@@ -158,7 +157,6 @@ final class FakeToolProvider: ToolProvider, @unchecked Sendable {
     }
 
     var executions: [FakeToolCall] { lock.withLock { _executions } }
-    var preparedCwds: [String] { lock.withLock { _preparedCwds } }
 
     /// Runs after each recorded execution.
     var onExecute: (@Sendable (FakeToolCall) -> Void)? {
@@ -185,10 +183,6 @@ final class FakeToolProvider: ToolProvider, @unchecked Sendable {
             }
         hook?(call)
         return ToolResult(text: result, image: image)
-    }
-
-    func prepare(cwd: String) async {
-        lock.withLock { _preparedCwds.append(cwd) }
     }
 }
 

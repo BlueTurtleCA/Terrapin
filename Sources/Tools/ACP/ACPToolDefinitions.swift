@@ -15,8 +15,8 @@ extension ACPClientTools {
     // attempt image reads it could never use.
     var readTextFileDefinition: ToolDefinition {
         let description = supportsVision == false
-            ? "Reads a file from the client's file system, including unsaved editor changes. Text files are returned as text; the current model cannot view image files. For any project files, you MUST use this call."
-            : "Reads a file from the client's file system, including unsaved editor changes. Text files are returned as text; image files (PNG, JPEG, GIF, WebP, TIFF, BMP, HEIC) are returned as images you can see. For any project files, you MUST use this call."
+            ? "Reads a file or a line range from a file on the client's file system, including unsaved editor changes. Text files are returned as text; the current model cannot view image files. For any project files, you MUST use this call."
+            : "Reads a file or a line range from a file on the client's file system, including unsaved editor changes. Text files are returned as text; image files (PNG, JPEG, GIF, WebP, TIFF, BMP, HEIC) are returned as images you can see. For any project files, you MUST use this call."
         return ToolDefinition(
             function: FunctionDefinition(
                 name: "read_file",
@@ -33,13 +33,13 @@ extension ACPClientTools {
                 "type": AnySendable("string"),
                 "description": AnySendable("Path of the file to read. Relative paths are resolved against the working directory.")
             ]),
-            "line": AnySendable([
+            "start": AnySendable([
                 "type": AnySendable("integer"),
-                "description": AnySendable("Optional 1-based line number to start reading from.")
+                "description": AnySendable("Optional 1-based line number to start reading from. Defaults to the first line.")
             ]),
-            "limit": AnySendable([
+            "end": AnySendable([
                 "type": AnySendable("integer"),
-                "description": AnySendable("Optional maximum number of lines to read.")
+                "description": AnySendable("Optional 1-based line number to end reading at, inclusive. Defaults to the last line.")
             ])
         ]),
         "required": AnySendable([AnySendable("path")])

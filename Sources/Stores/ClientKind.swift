@@ -11,7 +11,7 @@ import Foundation
 /// its system prompt and toolset (e.g. Xcode MCP tools only make sense when
 /// Xcode is driving the session).
 public enum ClientKind: Sendable, Hashable {
-    /// Xcode 27, which drives the native `xcrun mcpbridge` toolset.
+    /// Xcode 27, which declares its own MCP server per session.
     case xcode
     /// Android Studio, which drives sessions in Android/Gradle projects.
     case androidstudio

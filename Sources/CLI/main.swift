@@ -26,13 +26,10 @@ let sessionStore = SessionStore(logger: logger)
 // period (the same startup sweep Claude Code performs).
 await sessionStore.cleanupStaleSessions()
 
-// 2. Create the native Xcode MCP bridge client. It is started lazily by the
-//    ACP server once the connecting client identifies itself as Xcode.
-let mcpClient = XcodeMCPBridgeClient(logger, debugLog: config.debugLog)
-
-// 3. Register the client-agnostic tool providers (built-in web tools +
-//    native ACP client tools). The Xcode MCP bridge is added to the registry
-//    by the ACP server after client detection.
+// 2. Register the client-agnostic tool providers (built-in web tools +
+//    native ACP client tools). The MCP servers each client declares for a
+//    session (Xcode's own MCP server, Android Studio's "ide-tools", ...)
+//    are started and layered on per session by the ACP server.
 let clientChannel = ClientChannel()
 
 // Ask the server what it says about the loaded model: the context window and,
@@ -44,7 +41,6 @@ let modelInfo = await ContextManager.resolveModelInfo(
 )
 let clientTools = ACPClientTools(
     clientChannel: clientChannel,
-    xcodeBridge: mcpClient,
     supportsVision: modelInfo.supportsVision
 )
 
@@ -77,10 +73,10 @@ case nil:
     logger.debug("Server did not report vision support: image reads enabled (unknown)")
 }
 if config.debugLog {
-    logger.debug("Debug logging enabled: LLM request bodies + Xcode MCP bridge calls -> ~/.terrapin/logs/")
+    logger.debug("Debug logging enabled: LLM request bodies + MCP tool calls -> ~/.terrapin/logs/")
 }
 
-// 4. Wire up the agent
+// 3. Wire up the agent
 let agent = Agent(
     llmClient: OpenAICompatibleClient(
         endpoint: config.chatCompletionsURL,
@@ -98,12 +94,11 @@ let agent = Agent(
     supportsVision: modelInfo.supportsVision
 )
 
-// 5. Serve ACP over stdin/stdout
+// 4. Serve ACP over stdin/stdout
 let server = ACPServer(
     agent: agent,
     sessionStore: sessionStore,
     toolRegistry: toolRegistry,
-    xcodeBridge: mcpClient,
     clientChannel: clientChannel,
     clientTools: clientTools,
     defaultClient: config.defaultClient,

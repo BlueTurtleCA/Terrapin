@@ -115,6 +115,11 @@ struct CompactCommandTests {
         #expect(chunk.hasPrefix("ℹ️ Compacted conversation:"))
         #expect(chunk.contains("removed 3 older messages"))
         #expect(chunk.contains("kept the most recent 5 messages"))
+        // No token counts in the user-facing message, and a trailing
+        // newline so inline-rendering clients start the model's next
+        // message on its own line.
+        #expect(!chunk.contains("tokens"))
+        #expect(chunk.hasSuffix("\n"))
     }
 
     @Test("/compact on the last line of a multi-line prompt compacts")

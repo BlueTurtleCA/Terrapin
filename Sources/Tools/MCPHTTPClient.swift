@@ -17,9 +17,22 @@ public protocol MCPClientHandle: ToolProvider {
     /// Runs the MCP handshake (initialize → notifications/initialized).
     func start() async throws
 
-    /// Fetches every tool the server advertises (tools/list).
+    /// Fetches every tool the server advertises (tools/list), unfiltered
+    /// by the policy allowlist.
     @discardableResult
     func fetchTools() async -> [ToolDefinition]
+
+    /// Every tool name the server advertises, unfiltered by the policy
+    /// allowlist — for internal routing (e.g. read_file → XcodeRead),
+    /// which must reach tools the model is not offered directly.
+    func advertisedToolNames() async -> [String]
+
+    /// Executes one tool (tools/call) and returns the text of its result
+    /// without emitting any session/update tool-call notifications. For
+    /// internal round-trips that should stay invisible in the client UI
+    /// (e.g. read_file calling the IDE's XcodeRead); the caller emits
+    /// updates under its own tool name.
+    func callTool(name: String, argsJSON: String) async -> String
 
     /// Closes the connection and releases its resources.
     func stop() async
@@ -70,6 +83,13 @@ public actor MCPHTTPClient: MCPClientHandle {
     private let kind: Kind
     private let logger: Loggable
     private let debugLog: Bool
+    /// The connected client's policy for this server's tools (allowlist +
+    /// presentation).
+    private let policy: MCPToolPolicy
+    /// The server's statement about the model's vision support (nil when it
+    /// does not report it); gates the policy's vision-required tools in
+    /// definitions().
+    private let supportsVision: Bool?
     private let session: URLSession
 
     private var url: URL?
@@ -99,12 +119,16 @@ public actor MCPHTTPClient: MCPClientHandle {
         descriptor: MCPServerDescriptor,
         logger: Loggable,
         debugLog: Bool = false,
+        policy: MCPToolPolicy = .unrestricted,
+        supportsVision: Bool? = nil,
         handshakeTimeout: TimeInterval = 10,
         toolCallTimeout: TimeInterval = 600
     ) {
         self.descriptor = descriptor
         self.logger = logger
         self.debugLog = debugLog
+        self.policy = policy
+        self.supportsVision = supportsVision
         self.handshakeTimeout = handshakeTimeout
         self.toolCallTimeout = toolCallTimeout
 
@@ -136,7 +160,17 @@ public actor MCPHTTPClient: MCPClientHandle {
         descriptor.name
     }
 
-    public func definitions() async -> [ToolDefinition] { tools }
+    /// The tools offered to the model: the advertised tools narrowed by
+    /// the policy allowlist (and by the policy's vision-required set when
+    /// the model does not support vision).
+    public func definitions() async -> [ToolDefinition] {
+        tools.filter { policy.isAllowed($0.function.name, supportsVision: supportsVision) }
+    }
+
+    /// Every tool name the server advertises, unfiltered by the allowlist.
+    public func advertisedToolNames() async -> [String] {
+        tools.map { $0.function.name }
+    }
 
     // MARK: - MCPClientHandle
 
@@ -188,8 +222,8 @@ public actor MCPHTTPClient: MCPClientHandle {
         await notify("notifications/initialized")
     }
 
-    /// Fetches every tool the server advertises (tools/list). First pass:
-    /// no allowlist, every tool is exposed to the model.
+    /// Fetches every tool the server advertises (tools/list), unfiltered
+    /// by the policy allowlist (see definitions() and advertisedToolNames()).
     @discardableResult
     public func fetchTools() async -> [ToolDefinition] {
         // The server never completed the handshake, so a tools/list request
@@ -258,6 +292,7 @@ public actor MCPHTTPClient: MCPClientHandle {
         sendJSON: ([String: Any]) -> Void
     ) async -> ToolResult {
         let callId = "call_" + UUID().uuidString
+        let category = policy.category(for: name)
         sendJSON([
             "jsonrpc": "2.0",
             "method": "session/update",
@@ -267,14 +302,14 @@ public actor MCPHTTPClient: MCPClientHandle {
                     "sessionUpdate": "tool_call",
                     "toolCallId": callId,
                     "name": name,
-                    "title": name,
-                    "kind": "execute",
+                    "title": category.title,
+                    "kind": category.kind,
                     "status": "in_progress"
                 ]
             ]
         ])
 
-        let (text, image, isFailure) = await callTool(name: name, argsJSON: argsJSON)
+        let (text, image, isFailure) = await performToolCall(name: name, argsJSON: argsJSON)
         if debugLog {
             Self.appendDebugLog(server: descriptor.name, name: name, argsJSON: argsJSON, result: text)
         }
@@ -297,10 +332,18 @@ public actor MCPHTTPClient: MCPClientHandle {
 
     // MARK: - Tool Calls
 
+    /// One invisible tools/call round-trip: the raw text result, with a
+    /// failure prefix when the call did not succeed.
+    public func callTool(name: String, argsJSON: String) async -> String {
+        let (text, _, isFailure) = await performToolCall(name: name, argsJSON: argsJSON)
+        guard isFailure else { return text }
+        return text.hasPrefix("Error") ? text : "Error: \(text)"
+    }
+
     /// Runs one tool (tools/call) and decodes its content. The response is
     /// JSON-RPC `result`-shaped (content is an array of typed parts); an
     /// isError flag or a JSON-RPC error object marks a failure.
-    private func callTool(name: String, argsJSON: String)
+    private func performToolCall(name: String, argsJSON: String)
         async -> (text: String, image: ImageAttachment?, isFailure: Bool)
     {
         let argsDict: [String: Any] =

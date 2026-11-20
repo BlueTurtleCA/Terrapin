@@ -18,7 +18,7 @@ Xcode  ⇄  (ACP / JSON-RPC)  ⇄  Terrapin  ⇄  (OpenAI-compatible HTTP)  ⇄ 
 
 ### What it can do
 
-- **Read, edit, build, test, and debug** the project open in Xcode through Xcode's native MCP tools (discovered at runtime via `xcrun mcpbridge`).
+- **Read, edit, build, test, and debug** the project open in Xcode through Xcode's native MCP tools (Xcode declares its own MCP server in the session's `mcpServers` list, and Terrapin discovers the live tool list from it at runtime).
 - **Browse the web** with built-in `web_fetch` and `web_search` tools (Tavily when `TAVILY_API_KEY` is set, DuckDuckGo otherwise).
 - **Run a full agentic loop**: prompt the model, execute the tool calls it requests, feed the results back, and repeat until it produces a final answer (up to 50 turns).
 - **Stream** answer and thinking tokens to Xcode as they are generated.
@@ -33,19 +33,19 @@ Xcode  ⇄  (ACP / JSON-RPC)  ⇄  Terrapin  ⇄  (OpenAI-compatible HTTP)  ⇄ 
 When Xcode sends a prompt, Terrapin:
 
 1. Loads (or creates) the session's chat history and builds the system prompt from the bundled template, injecting the working directory and any `AGENTS.md` instructions.
-2. Opens the Xcode workspace up front so workspace tools work on the first call.
+2. Starts the MCP servers the client declared for the session (Xcode declares its own MCP server in the session's `mcpServers` list) and registers their tools.
 3. Sends the history to the model's `/v1/chat/completions` endpoint along with all available tools, streaming the response.
 4. If the model returns tool calls, it executes each one (Xcode MCP tools or web tools), appends the results to the history, and loops back to step 3.
 5. When the model returns a final answer, it streams the text to Xcode and saves the updated history.
 
-The Xcode tools are not hard-coded. Terrapin spawns `xcrun mcpbridge`, performs the MCP handshake, and pulls the live tool list from Xcode, so it automatically supports whatever tools your Xcode build exposes.
+The Xcode tools are not hard-coded. Xcode declares its own MCP server in the session's `mcpServers` list, Terrapin performs the MCP handshake against it, and pulls the live tool list, so it automatically supports whatever tools your Xcode build exposes. Which of those tools the model is offered — and how each tool call is presented in the IDE (its `kind` and `title`) — is decided by a per-client `MCPToolPolicy`: Xcode's policy offers a curated set of build, test, diagnostic, and documentation tools (file access stays with the native tools), Android Studio's policy currently offers everything its "ide-tools" bridge advertises, and any other client gets an unrestricted policy. The native file tools additionally route through the IDE's Xcode tools under the hood (when the declared server offers them): `read_file` → `XcodeRead` (reads see unsaved editor changes), `write_file` → `XcodeWrite`, `move_file` → `XcodeMV`, `delete_file` → `XcodeRM`, and `list_directory` → `XcodeLS` — so the IDE always stays in sync, with a fallback to the ACP client channel when the IDE does not offer the tool or the call fails.
 
-The same applies to any ACP client that declares its own MCP servers. If `session/new` or `session/load` carries an `mcpServers` list (Android Studio sends one — an `nc` pipe into the IDE's "ide-tools" server), Terrapin spawns each stdio server, runs the MCP handshake, and registers every tool the server advertises. The servers are torn down when the session is deleted.
+The same applies to any ACP client that declares its own MCP servers. If `session/new` or `session/load` carries an `mcpServers` list (Android Studio sends one — an `nc` pipe into the IDE's "ide-tools" server), Terrapin spawns each stdio server, runs the MCP handshake, and registers the tools the server advertises, filtered by the connected client's policy. The servers are torn down when the session is deleted.
 
 ## Requirements
 
 - macOS 15 or later, or Windows
-- Xcode 27 for the Xcode integration (provides `xcrun mcpbridge` and the ACP agent host); on Windows the generic client template is used automatically
+- Xcode 27 for the Xcode integration (provides its own MCP server and the ACP agent host); on Windows the generic client template is used automatically
 - Swift 6.4 toolchain
 - A running OpenAI-compatible server (`llama.cpp`, LM Studio, `mlx` server, etc.)
 
@@ -112,11 +112,11 @@ Terrapin reads one JSON-RPC message per line from `stdin` and writes JSON-RPC re
 
 ### Client detection
 
-On `initialize`, Terrapin reads the client's `clientInfo` (name/title) to identify the connecting client. Xcode gets the Xcode-specific system prompt and the `xcrun mcpbridge` toolset (spawned lazily on the first `session/new`); Android Studio gets the Android Studio prompt; any other ACP client (VS Code, Zed, ...) gets a generic prompt and the client-agnostic tools (native ACP file tools + web tools). When a client does not identify itself, `--default-client` decides. Regardless of client, any stdio MCP servers the client declares in the session's `mcpServers` parameter are started and their tools registered.
+On `initialize`, Terrapin reads the client's `clientInfo` (name/title) to identify the connecting client. Xcode gets the Xcode-specific system prompt and its own MCP toolset (declared in the session's `mcpServers`); Android Studio gets the Android Studio prompt; any other ACP client (VS Code, Zed, ...) gets a generic prompt and the client-agnostic tools (native ACP file tools + web tools). When a client does not identify itself, `--default-client` decides. Regardless of client, any stdio MCP servers the client declares in the session's `mcpServers` parameter are started and their tools registered.
 
 ## Tools
 
-- **Xcode MCP tools** — discovered at runtime from `xcrun mcpbridge` (read, edit, build, test, debug, previews, and more). Terrapin auto-injects the `workspaceIdentifier` and `tabIdentifier` so the model does not have to supply them.
+- **Xcode MCP tools** — Xcode declares its own MCP server in the session's `mcpServers` list; Terrapin runs the handshake against it and registers the tools it advertises, filtered by the connected client's `MCPToolPolicy` (which also decides each tool call's `kind`/`title`). Tool calls run over the same JSON-RPC transport and stream `tool_call` / `tool_call_update` notifications, exactly like any other declared server.
 - **Client-declared MCP servers** — stdio servers from the ACP `mcpServers` parameter (e.g. Android Studio's `ide-tools`) are spawned per session, handshaken, and their full tool list registered. Tool calls run over the same JSON-RPC transport and stream `tool_call` / `tool_call_update` notifications; image content blocks are attached to the tool result for vision models.
 - **Native ACP file tools** — `read_file`, `write_file`, `edit_file`, `grep_file`, `list_directory`, `move_file`, `delete_file`. `read_file` reads text files as text, and image files (PNG, JPEG, GIF, WebP, TIFF, BMP, HEIC) as images: it sniffs the format from the file's leading bytes, downsamples the longest edge to ~1568px, re-encodes it under a 1MB budget, and sends it to the model as an `image_url` content part (data URL). Image payloads live only in the in-memory conversation — persisted history keeps a note in their place instead of the base64.
 - **`web_fetch`** — fetches an HTTP/HTTPS URL and returns its text content.
@@ -235,8 +235,8 @@ Terrapin/
         ├── ToolProvider.swift           # Tool provider protocol + registry
         ├── WebTools.swift               # web_fetch + web_search
         ├── SkillTools.swift             # use_skill
-        ├── XcodeMCPBridgeClient.swift   # xcrun mcpbridge MCP client
-        └── MCPStdioClient.swift         # client-declared stdio MCP servers (ACP mcpServers)
+        ├── MCPStdioClient.swift         # client-declared stdio MCP servers (ACP mcpServers)
+        └── MCPHTTPClient.swift          # client-declared HTTP/SSE MCP servers (ACP mcpServers)
 ```
 
 ## License
